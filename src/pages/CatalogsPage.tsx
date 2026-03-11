@@ -4,28 +4,32 @@ import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import {
   catalogs,
   type CatalogItem,
-  type MaterialItem,
   type ExtraOptionType,
+  type CodeCatalogItem,
+  type PrintCategoryItem,
   type CreateCatalogInput,
   type UpdateCatalogInput,
-  type CreateMaterialInput,
   type CreateExtraOptionInput,
   type UpdateExtraOptionInput,
+  type CreateCodeCatalogInput,
+  type UpdateCodeCatalogInput,
 } from "@/infrastructure/tauri-bridge";
 
 interface CatalogDef {
   key: string;
   label: string;
-  type: "simple" | "material" | "extra";
+  type: "simple" | "extra" | "code" | "print_category";
 }
 
 const CATALOG_DEFS: CatalogDef[] = [
   { key: "book_formats", label: "Форматы фотокниг", type: "simple" },
   { key: "print_formats", label: "Форматы печати", type: "simple" },
-  { key: "cover_types", label: "Типы обложек", type: "simple" },
-  { key: "cover_materials", label: "Материалы обложек", type: "simple" },
+  { key: "print_categories", label: "Категории печати", type: "print_category" },
+  { key: "assembly_kinds", label: "Типы сборки книг", type: "code" },
+  { key: "cover_families", label: "Типы обложек книг", type: "code" },
+  { key: "book_cover_options", label: "Опции обложек", type: "simple" },
+  { key: "wide_format_materials", label: "Материалы широкоформатки", type: "simple" },
   { key: "lamination_types", label: "Типы ламинации", type: "simple" },
-  { key: "materials", label: "Материалы", type: "material" },
   { key: "extra_option_types", label: "Доп. опции", type: "extra" },
 ];
 
@@ -33,12 +37,23 @@ const CATALOG_COMMANDS: Record<string, {
   listAll: () => Promise<CatalogItem[]>;
   create: (input: CreateCatalogInput) => Promise<CatalogItem>;
   update: (id: number, input: UpdateCatalogInput) => Promise<CatalogItem>;
+  delete: (id: number) => Promise<void>;
 }> = {
-  book_formats: { listAll: catalogs.allBookFormats, create: catalogs.createBookFormat, update: catalogs.updateBookFormat },
-  print_formats: { listAll: catalogs.allPrintFormats, create: catalogs.createPrintFormat, update: catalogs.updatePrintFormat },
-  cover_types: { listAll: catalogs.allCoverTypes, create: catalogs.createCoverType, update: catalogs.updateCoverType },
-  cover_materials: { listAll: catalogs.allCoverMaterials, create: catalogs.createCoverMaterial, update: catalogs.updateCoverMaterial },
-  lamination_types: { listAll: catalogs.allLaminationTypes, create: catalogs.createLaminationType, update: catalogs.updateLaminationType },
+  book_formats: { listAll: catalogs.allBookFormats, create: catalogs.createBookFormat, update: catalogs.updateBookFormat, delete: catalogs.deleteBookFormat },
+  print_formats: { listAll: catalogs.allPrintFormats, create: catalogs.createPrintFormat, update: catalogs.updatePrintFormat, delete: catalogs.deletePrintFormat },
+  lamination_types: { listAll: catalogs.allLaminationTypes, create: catalogs.createLaminationType, update: catalogs.updateLaminationType, delete: catalogs.deleteLaminationType },
+  book_cover_options: { listAll: catalogs.allBookCoverOptions, create: catalogs.createBookCoverOption, update: catalogs.updateBookCoverOption, delete: catalogs.deleteBookCoverOption },
+  wide_format_materials: { listAll: catalogs.allWideFormatMaterials, create: catalogs.createWideFormatMaterial, update: catalogs.updateWideFormatMaterial, delete: catalogs.deleteWideFormatMaterial },
+};
+
+const CODE_CATALOG_COMMANDS: Record<string, {
+  listAll: () => Promise<CodeCatalogItem[]>;
+  create: (input: CreateCodeCatalogInput) => Promise<CodeCatalogItem>;
+  update: (id: number, input: UpdateCodeCatalogInput) => Promise<CodeCatalogItem>;
+  delete: (id: number) => Promise<void>;
+}> = {
+  assembly_kinds: { listAll: catalogs.allAssemblyKinds, create: catalogs.createAssemblyKind, update: catalogs.updateAssemblyKind, delete: catalogs.deleteAssemblyKind },
+  cover_families: { listAll: catalogs.allCoverFamilies, create: catalogs.createCoverFamily, update: catalogs.updateCoverFamily, delete: catalogs.deleteCoverFamily },
 };
 
 export function CatalogsPage() {
@@ -73,7 +88,10 @@ export function CatalogsPage() {
       {activeDef.type === "simple" && (
         <SimpleCatalogEditor catalogKey={activeTab} />
       )}
-      {activeDef.type === "material" && <MaterialsEditor />}
+      {activeDef.type === "code" && (
+        <CodeCatalogEditor catalogKey={activeTab} />
+      )}
+      {activeDef.type === "print_category" && <PrintCategoriesEditor />}
       {activeDef.type === "extra" && <ExtraOptionsEditor />}
     </div>
   );
@@ -121,6 +139,17 @@ function SimpleCatalogEditor({ catalogKey }: { catalogKey: string }) {
     }
   };
 
+  const handleDelete = async (item: CatalogItem) => {
+    if (!confirm(`Удалить «${item.name}»?`)) return;
+    try {
+      await cmds.delete(item.id);
+      toast.success("Удалено");
+      refetch();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-md">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
@@ -156,7 +185,7 @@ function SimpleCatalogEditor({ catalogKey }: { catalogKey: string }) {
           <div className="text-center py-10 text-gray-400 text-sm">Пусто</div>
         ) : (
           data.map((item) => (
-            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between">
+            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between group">
               {editingId === item.id ? (
                 <div className="flex-1 flex gap-2 mr-4">
                   <input
@@ -177,161 +206,25 @@ function SimpleCatalogEditor({ catalogKey }: { catalogKey: string }) {
                   {item.name}
                 </span>
               )}
-              <button
-                onClick={() => handleToggle(item)}
-                className={`text-xs px-2 py-0.5 rounded ${
-                  item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
-                }`}
-              >
-                {item.is_active ? "Активно" : "Неактивно"}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => handleToggle(item)}
+                  className={`text-xs px-2 py-0.5 rounded ${
+                    item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                  }`}
+                >
+                  {item.is_active ? "Активно" : "Неактивно"}
+                </button>
+                <button
+                  onClick={() => handleDelete(item)}
+                  className="text-xs text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                >
+                  Удл.
+                </button>
+              </div>
             </div>
           ))
         )}
-      </div>
-    </div>
-  );
-}
-
-const MATERIAL_CATEGORIES = [
-  { value: "block", label: "Блок" },
-  { value: "print", label: "Печать" },
-  { value: "finishing", label: "Отделка" },
-];
-
-function MaterialsEditor() {
-  const { data, refetch } = useTauriCommand(catalogs.allMaterials);
-  const [showAdd, setShowAdd] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newCategory, setNewCategory] = useState("block");
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editName, setEditName] = useState("");
-
-  const handleCreate = async () => {
-    if (!newName.trim()) return;
-    try {
-      await catalogs.createMaterial({ name: newName.trim(), category: newCategory } as CreateMaterialInput);
-      toast.success("Добавлено");
-      setNewName("");
-      setShowAdd(false);
-      refetch();
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  const handleUpdate = async (id: number) => {
-    if (!editName.trim()) return;
-    try {
-      await catalogs.updateMaterial(id, { name: editName.trim() });
-      toast.success("Обновлено");
-      setEditingId(null);
-      refetch();
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  const handleToggle = async (item: MaterialItem) => {
-    try {
-      await catalogs.updateMaterial(item.id, { is_active: !item.is_active });
-      refetch();
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  const grouped = (data ?? []).reduce(
-    (acc, m) => {
-      (acc[m.category] = acc[m.category] || []).push(m);
-      return acc;
-    },
-    {} as Record<string, MaterialItem[]>
-  );
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-md">
-      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
-        <span className="text-sm font-semibold">{data?.length ?? 0} материалов</span>
-        <button
-          className="text-blue-600 text-sm hover:text-blue-700"
-          onClick={() => setShowAdd(!showAdd)}
-        >
-          {showAdd ? "Отмена" : "+ Добавить"}
-        </button>
-      </div>
-
-      {showAdd && (
-        <div className="px-5 py-3 border-b border-gray-100 flex gap-2">
-          <select
-            value={newCategory}
-            onChange={(e) => setNewCategory(e.target.value)}
-            className="px-2 py-1.5 border border-gray-200 rounded text-sm"
-          >
-            {MATERIAL_CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>{c.label}</option>
-            ))}
-          </select>
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Название"
-            className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500"
-            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-          />
-          <button
-            onClick={handleCreate}
-            className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-          >
-            Добавить
-          </button>
-        </div>
-      )}
-
-      <div className="divide-y divide-gray-100">
-        {MATERIAL_CATEGORIES.map((cat) => {
-          const items = grouped[cat.value] ?? [];
-          if (items.length === 0 && !showAdd) return null;
-          return (
-            <div key={cat.value}>
-              <div className="px-5 py-2 bg-gray-50 text-xs font-semibold text-gray-500 uppercase">
-                {cat.label}
-              </div>
-              {items.map((item) => (
-                <div key={item.id} className="px-5 py-2.5 flex items-center justify-between">
-                  {editingId === item.id ? (
-                    <div className="flex-1 flex gap-2 mr-4">
-                      <input
-                        value={editName}
-                        onChange={(e) => setEditName(e.target.value)}
-                        className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500"
-                        onKeyDown={(e) => e.key === "Enter" && handleUpdate(item.id)}
-                        autoFocus
-                      />
-                      <button onClick={() => handleUpdate(item.id)} className="text-xs text-blue-600">OK</button>
-                      <button onClick={() => setEditingId(null)} className="text-xs text-gray-400">Отмена</button>
-                    </div>
-                  ) : (
-                    <span
-                      className={`text-sm cursor-pointer hover:text-blue-600 ${!item.is_active ? "text-gray-400 line-through" : ""}`}
-                      onClick={() => { setEditingId(item.id); setEditName(item.name); }}
-                    >
-                      {item.name}
-                    </span>
-                  )}
-                  <button
-                    onClick={() => handleToggle(item)}
-                    className={`text-xs px-2 py-0.5 rounded ${
-                      item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
-                    }`}
-                  >
-                    {item.is_active ? "Активно" : "Неактивно"}
-                  </button>
-                </div>
-              ))}
-            </div>
-          );
-        })}
       </div>
     </div>
   );
@@ -388,6 +281,17 @@ function ExtraOptionsEditor() {
     }
   };
 
+  const handleDelete = async (item: ExtraOptionType) => {
+    if (!confirm(`Удалить «${item.name}»?`)) return;
+    try {
+      await catalogs.deleteExtraOptionType(item.id);
+      toast.success("Удалено");
+      refetch();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-md">
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
@@ -430,7 +334,7 @@ function ExtraOptionsEditor() {
           <div className="text-center py-10 text-gray-400 text-sm">Пусто</div>
         ) : (
           data.map((item) => (
-            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between">
+            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between group">
               {editingId === item.id ? (
                 <div className="flex-1 flex gap-2 mr-4">
                   <input
@@ -465,14 +369,261 @@ function ExtraOptionsEditor() {
                   )}
                 </div>
               )}
-              <button
-                onClick={() => handleToggle(item)}
-                className={`text-xs px-2 py-0.5 rounded ${
-                  item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
-                }`}
-              >
-                {item.is_active ? "Активно" : "Неактивно"}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => handleToggle(item)}
+                  className={`text-xs px-2 py-0.5 rounded ${
+                    item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                  }`}
+                >
+                  {item.is_active ? "Активно" : "Неактивно"}
+                </button>
+                <button
+                  onClick={() => handleDelete(item)}
+                  className="text-xs text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                >
+                  Удл.
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Code catalog editor (code + name) ───────────────────────────────
+
+function CodeCatalogEditor({ catalogKey }: { catalogKey: string }) {
+  const cmds = CODE_CATALOG_COMMANDS[catalogKey];
+  const { data, refetch } = useTauriCommand(cmds.listAll, [catalogKey]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  const [newName, setNewName] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editCode, setEditCode] = useState("");
+  const [editName, setEditName] = useState("");
+
+  const handleCreate = async () => {
+    if (!newCode.trim() || !newName.trim()) return;
+    try {
+      await cmds.create({ code: newCode.trim(), name: newName.trim() });
+      toast.success("Добавлено");
+      setNewCode(""); setNewName("");
+      setShowAdd(false);
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleUpdate = async (id: number) => {
+    try {
+      await cmds.update(id, { code: editCode.trim() || undefined, name: editName.trim() || undefined });
+      toast.success("Обновлено");
+      setEditingId(null);
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleToggle = async (item: CodeCatalogItem) => {
+    try {
+      await cmds.update(item.id, { is_active: !item.is_active });
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleDelete = async (item: CodeCatalogItem) => {
+    if (!confirm(`Удалить «${item.name}»?`)) return;
+    try {
+      await cmds.delete(item.id);
+      toast.success("Удалено");
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-md">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+        <span className="text-sm font-semibold">{data?.length ?? 0} записей</span>
+        <button className="text-blue-600 text-sm hover:text-blue-700" onClick={() => setShowAdd(!showAdd)}>
+          {showAdd ? "Отмена" : "+ Добавить"}
+        </button>
+      </div>
+
+      {showAdd && (
+        <div className="px-5 py-3 border-b border-gray-100 flex gap-2">
+          <input value={newCode} onChange={(e) => setNewCode(e.target.value)} placeholder="Код (лат.)" className="w-36 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" />
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Название" className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" onKeyDown={(e) => e.key === "Enter" && handleCreate()} />
+          <button onClick={handleCreate} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Добавить</button>
+        </div>
+      )}
+
+      <div className="divide-y divide-gray-100">
+        {!data || data.length === 0 ? (
+          <div className="text-center py-10 text-gray-400 text-sm">Пусто</div>
+        ) : (
+          data.map((item) => (
+            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between group">
+              {editingId === item.id ? (
+                <div className="flex-1 flex gap-2 mr-4">
+                  <input value={editCode} onChange={(e) => setEditCode(e.target.value)} className="w-36 px-2 py-1 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" autoFocus />
+                  <input value={editName} onChange={(e) => setEditName(e.target.value)} className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" onKeyDown={(e) => e.key === "Enter" && handleUpdate(item.id)} />
+                  <button onClick={() => handleUpdate(item.id)} className="text-xs text-blue-600">OK</button>
+                  <button onClick={() => setEditingId(null)} className="text-xs text-gray-400">Отмена</button>
+                </div>
+              ) : (
+                <div
+                  className={`cursor-pointer hover:text-blue-600 ${!item.is_active ? "text-gray-400 line-through" : ""}`}
+                  onClick={() => { setEditingId(item.id); setEditCode(item.code); setEditName(item.name); }}
+                >
+                  <span className="text-sm font-medium">{item.name}</span>
+                  <span className="text-xs text-gray-400 ml-2">({item.code})</span>
+                </div>
+              )}
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => handleToggle(item)} className={`text-xs px-2 py-0.5 rounded ${item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                  {item.is_active ? "Активно" : "Неактивно"}
+                </button>
+                <button onClick={() => handleDelete(item)} className="text-xs text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity px-1">
+                  Удл.
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Print categories editor ─────────────────────────────────────────
+
+const FIELD_TYPE_LABELS: Record<string, string> = {
+  format: "Формат печати",
+  material: "Материал широкоформатки",
+  lamination: "Тип ламинации",
+};
+
+function PrintCategoriesEditor() {
+  const { data, refetch } = useTauriCommand(catalogs.allPrintCategories);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newUnit, setNewUnit] = useState("шт.");
+  const [newFieldType, setNewFieldType] = useState("format");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editCode, setEditCode] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editUnit, setEditUnit] = useState("");
+  const [editFieldType, setEditFieldType] = useState("");
+
+  const handleCreate = async () => {
+    if (!newCode.trim() || !newName.trim()) return;
+    try {
+      await catalogs.createPrintCategory({
+        code: newCode.trim(), name: newName.trim(),
+        unit: newUnit || "шт.", field_type: newFieldType,
+      });
+      toast.success("Добавлено");
+      setNewCode(""); setNewName(""); setNewUnit("шт."); setNewFieldType("format");
+      setShowAdd(false);
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleUpdate = async (id: number) => {
+    try {
+      await catalogs.updatePrintCategory(id, {
+        code: editCode.trim() || undefined, name: editName.trim() || undefined,
+        unit: editUnit || undefined, field_type: editFieldType || undefined,
+      });
+      toast.success("Обновлено");
+      setEditingId(null);
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleToggle = async (item: PrintCategoryItem) => {
+    try {
+      await catalogs.updatePrintCategory(item.id, { is_active: !item.is_active });
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleDelete = async (item: PrintCategoryItem) => {
+    if (!confirm(`Удалить «${item.name}»?`)) return;
+    try {
+      await catalogs.deletePrintCategory(item.id);
+      toast.success("Удалено");
+      refetch();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-md">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+        <span className="text-sm font-semibold">{data?.length ?? 0} категорий</span>
+        <button className="text-blue-600 text-sm hover:text-blue-700" onClick={() => setShowAdd(!showAdd)}>
+          {showAdd ? "Отмена" : "+ Добавить"}
+        </button>
+      </div>
+
+      {showAdd && (
+        <div className="px-5 py-3 border-b border-gray-100 space-y-2">
+          <div className="flex gap-2">
+            <input value={newCode} onChange={(e) => setNewCode(e.target.value)} placeholder="Код (лат.)" className="w-40 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" />
+            <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Название" className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div className="flex gap-2">
+            <input value={newUnit} onChange={(e) => setNewUnit(e.target.value)} placeholder="Ед. изм." className="w-24 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500" />
+            <select value={newFieldType} onChange={(e) => setNewFieldType(e.target.value)} className="px-2 py-1.5 border border-gray-200 rounded text-sm">
+              {Object.entries(FIELD_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+            <button onClick={handleCreate} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Добавить</button>
+          </div>
+        </div>
+      )}
+
+      <div className="divide-y divide-gray-100">
+        {!data || data.length === 0 ? (
+          <div className="text-center py-10 text-gray-400 text-sm">Пусто</div>
+        ) : (
+          data.map((item) => (
+            <div key={item.id} className="px-5 py-2.5 flex items-center justify-between group">
+              {editingId === item.id ? (
+                <div className="flex-1 space-y-1 mr-4">
+                  <div className="flex gap-2">
+                    <input value={editCode} onChange={(e) => setEditCode(e.target.value)} className="w-40 px-2 py-1 border border-gray-200 rounded text-sm" autoFocus />
+                    <input value={editName} onChange={(e) => setEditName(e.target.value)} className="flex-1 px-2 py-1 border border-gray-200 rounded text-sm" />
+                  </div>
+                  <div className="flex gap-2">
+                    <input value={editUnit} onChange={(e) => setEditUnit(e.target.value)} className="w-24 px-2 py-1 border border-gray-200 rounded text-sm" />
+                    <select value={editFieldType} onChange={(e) => setEditFieldType(e.target.value)} className="px-2 py-1 border border-gray-200 rounded text-sm">
+                      {Object.entries(FIELD_TYPE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                    </select>
+                    <button onClick={() => handleUpdate(item.id)} className="text-xs text-blue-600">OK</button>
+                    <button onClick={() => setEditingId(null)} className="text-xs text-gray-400">Отмена</button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  className={`cursor-pointer hover:text-blue-600 ${!item.is_active ? "text-gray-400 line-through" : ""}`}
+                  onClick={() => { setEditingId(item.id); setEditCode(item.code); setEditName(item.name); setEditUnit(item.unit); setEditFieldType(item.field_type); }}
+                >
+                  <span className="text-sm font-medium">{item.name}</span>
+                  <span className="text-xs text-gray-400 ml-2">({item.code})</span>
+                  <span className="text-xs text-gray-400 ml-2">{item.unit}</span>
+                  <span className="text-xs text-gray-400 ml-1">/ {FIELD_TYPE_LABELS[item.field_type] ?? item.field_type}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => handleToggle(item)} className={`text-xs px-2 py-0.5 rounded ${item.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                  {item.is_active ? "Активно" : "Неактивно"}
+                </button>
+                <button onClick={() => handleDelete(item)} className="text-xs text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity px-1">
+                  Удл.
+                </button>
+              </div>
             </div>
           ))
         )}

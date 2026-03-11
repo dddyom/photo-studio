@@ -1,21 +1,16 @@
-import type { PricingRule } from "@/infrastructure/tauri-bridge";
+import type {
+  PricingRule,
+  PrintCategoryItem,
+  CodeCatalogItem,
+  CatalogItem,
+} from "@/infrastructure/tauri-bridge";
 
 // ── Rule category types ──────────────────────────────────────────────
 
-export type PrintCategory =
-  | "lab_print"
-  | "wide_format_print"
-  | "wide_format_lamination"
-  | "photo_lamination"
-  | "photo_magnet"
-  | "photo_pvc"
-  | "dsp_picture"
-  | "canvas_stretched"
-  | "calendar_double_sided";
-
 export type BookComponent = "book_block" | "book_cover" | "book_cover_option";
 
-export type RuleCategory = PrintCategory | BookComponent;
+// RuleCategory is now a string — either a print category code or a BookComponent
+export type RuleCategory = string;
 
 // ── Category metadata ────────────────────────────────────────────────
 
@@ -36,120 +31,71 @@ export interface CategoryField {
   catalogKey?: string; // key in catalogs to load options dynamically
 }
 
-export const RULE_CATEGORIES: CategoryMeta[] = [
-  // ── Print categories ──
-  {
-    key: "lab_print",
-    label: "Лабораторная печать",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "wide_format_print",
-    label: "Широкоформатная печать",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за пог. м",
-    fields: [
-      {
-        key: "material",
-        label: "Материал",
-        type: "text_select",
-        options: [
-          { value: "Фотобумага матовая 106 см, самоклейка", label: "Фотобумага матовая 106 см, самоклейка" },
-          { value: "Печать на холсте, ширина 60 см", label: "Печать на холсте, ширина 60 см" },
-          { value: "Печать на холсте, ширина 90 см", label: "Печать на холсте, ширина 90 см" },
-        ],
-      },
-    ],
-  },
-  {
-    key: "wide_format_lamination",
-    label: "Ламинация широкоформатки",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за кв. м",
-    fields: [
-      {
-        key: "lamination_type",
-        label: "Тип ламинации",
-        type: "text_select",
-        options: [
-          { value: "Матовая", label: "Матовая" },
-          { value: "Глянцевая", label: "Глянцевая" },
-          { value: "Лён", label: "Лён" },
-          { value: "Алмазная", label: "Алмазная" },
-        ],
-      },
-    ],
-  },
-  {
-    key: "photo_lamination",
-    label: "Ламинация фото",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "photo_magnet",
-    label: "Фото на магните",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "photo_pvc",
-    label: "Фото на ПВХ",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "dsp_picture",
-    label: "Картина на ДСП",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "canvas_stretched",
-    label: "Холст на подрамнике",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
-  {
-    key: "calendar_double_sided",
-    label: "Двусторонний календарь",
-    group: "Печать",
-    itemKind: "print",
-    unit: "за шт.",
-    fields: [
-      { key: "format", label: "Формат", type: "format_select", catalogKey: "printFormats" },
-    ],
-  },
+// ── Catalog data for building dynamic categories ─────────────────────
 
-  // ── Book categories ──
-  {
+export interface PricingCatalogs {
+  printCategories: PrintCategoryItem[];
+  assemblyKinds: CodeCatalogItem[];
+  coverFamilies: CodeCatalogItem[];
+  bookCoverOptions: CatalogItem[];
+  wideFormatMaterials: CatalogItem[];
+  laminationTypes: CatalogItem[];
+}
+
+// Build field definition based on print category field_type
+function buildPrintCategoryField(
+  cat: PrintCategoryItem,
+  catalogs: PricingCatalogs
+): CategoryField {
+  if (cat.field_type === "material") {
+    return {
+      key: "material",
+      label: "Материал",
+      type: "text_select",
+      options: catalogs.wideFormatMaterials.map((m) => ({
+        value: m.name,
+        label: m.name,
+      })),
+    };
+  }
+  if (cat.field_type === "lamination") {
+    return {
+      key: "lamination_type",
+      label: "Тип ламинации",
+      type: "text_select",
+      options: catalogs.laminationTypes.map((t) => ({
+        value: t.name,
+        label: t.name,
+      })),
+    };
+  }
+  // Default: format
+  return {
+    key: "format",
+    label: "Формат",
+    type: "format_select",
+    catalogKey: "printFormats",
+  };
+}
+
+// Build the full RULE_CATEGORIES array dynamically from catalog data
+export function buildRuleCategories(catalogs: PricingCatalogs): CategoryMeta[] {
+  const categories: CategoryMeta[] = [];
+
+  // Print categories from DB
+  for (const cat of catalogs.printCategories) {
+    categories.push({
+      key: cat.code,
+      label: cat.name,
+      group: "Печать",
+      itemKind: "print",
+      unit: `за ${cat.unit}`,
+      fields: [buildPrintCategoryField(cat, catalogs)],
+    });
+  }
+
+  // Book categories (structural — always the same 3 types)
+  categories.push({
     key: "book_block",
     label: "Фотокнига — блок/сборка",
     group: "Фотокниги",
@@ -160,15 +106,21 @@ export const RULE_CATEGORIES: CategoryMeta[] = [
         key: "assembly_kind",
         label: "Тип сборки",
         type: "text_select",
-        options: [
-          { value: "plastic", label: "Пластик (plastic)" },
-          { value: "pvc_board", label: "ПВХ-основа (pvc_board)" },
-        ],
+        options: catalogs.assemblyKinds.map((a) => ({
+          value: a.code,
+          label: a.name,
+        })),
       },
-      { key: "format", label: "Формат книги", type: "format_select", catalogKey: "bookFormats" },
+      {
+        key: "format",
+        label: "Формат книги",
+        type: "format_select",
+        catalogKey: "bookFormats",
+      },
     ],
-  },
-  {
+  });
+
+  categories.push({
     key: "book_cover",
     label: "Фотокнига — обложка",
     group: "Фотокниги",
@@ -179,15 +131,21 @@ export const RULE_CATEGORIES: CategoryMeta[] = [
         key: "cover_family",
         label: "Тип обложки",
         type: "text_select",
-        options: [
-          { value: "laminated_hard", label: "Ламинированная жёсткая" },
-          { value: "eco_leather", label: "Экокожа" },
-        ],
+        options: catalogs.coverFamilies.map((c) => ({
+          value: c.code,
+          label: c.name,
+        })),
       },
-      { key: "format", label: "Формат книги", type: "format_select", catalogKey: "bookFormats" },
+      {
+        key: "format",
+        label: "Формат книги",
+        type: "format_select",
+        catalogKey: "bookFormats",
+      },
     ],
-  },
-  {
+  });
+
+  categories.push({
     key: "book_cover_option",
     label: "Фотокнига — опция обложки",
     group: "Фотокниги",
@@ -198,22 +156,31 @@ export const RULE_CATEGORIES: CategoryMeta[] = [
         key: "option_name",
         label: "Опция",
         type: "text_select",
-        options: [
-          { value: "Гравировка", label: "Гравировка" },
-          { value: "Фото-вставка", label: "Фото-вставка" },
-        ],
+        options: catalogs.bookCoverOptions.map((o) => ({
+          value: o.name,
+          label: o.name,
+        })),
       },
     ],
-  },
-];
+  });
 
-export function getCategoryMeta(key: RuleCategory): CategoryMeta | undefined {
-  return RULE_CATEGORIES.find((c) => c.key === key);
+  return categories;
+}
+
+// Convenience: get meta from a prebuilt list
+export function getCategoryMeta(
+  key: RuleCategory,
+  allCategories: CategoryMeta[]
+): CategoryMeta | undefined {
+  return allCategories.find((c) => c.key === key);
 }
 
 // ── Category detection from existing rule ────────────────────────────
 
-export function detectRuleCategory(rule: PricingRule): RuleCategory | null {
+export function detectRuleCategory(
+  rule: PricingRule,
+  allCategories: CategoryMeta[]
+): RuleCategory | null {
   let matchObj: Record<string, string>;
   try {
     matchObj = JSON.parse(rule.match_params);
@@ -223,8 +190,8 @@ export function detectRuleCategory(rule: PricingRule): RuleCategory | null {
 
   if (rule.item_kind === "print") {
     const cat = matchObj.category;
-    if (cat && RULE_CATEGORIES.some((c) => c.key === cat)) {
-      return cat as PrintCategory;
+    if (cat && allCategories.some((c) => c.key === cat)) {
+      return cat;
     }
     return null;
   }
@@ -244,7 +211,8 @@ export function detectRuleCategory(rule: PricingRule): RuleCategory | null {
 
 export function extractFormValues(
   rule: PricingRule,
-  category: RuleCategory
+  category: RuleCategory,
+  allCategories: CategoryMeta[]
 ): Record<string, string> {
   let matchObj: Record<string, string>;
   try {
@@ -253,7 +221,7 @@ export function extractFormValues(
     return {};
   }
 
-  const meta = getCategoryMeta(category);
+  const meta = getCategoryMeta(category, allCategories);
   if (!meta) return {};
 
   const values: Record<string, string> = {};
@@ -280,11 +248,12 @@ export function extractPrice(rule: PricingRule): number {
 
 export function buildMatchParams(
   category: RuleCategory,
-  fieldValues: Record<string, string>
+  fieldValues: Record<string, string>,
+  allCategories: CategoryMeta[]
 ): string {
   const params: Record<string, string> = {};
 
-  const meta = getCategoryMeta(category);
+  const meta = getCategoryMeta(category, allCategories);
   if (!meta) return "{}";
 
   if (meta.itemKind === "print") {
@@ -316,17 +285,19 @@ export function buildPriceFormula(price: number): string {
 
 // ── Human-readable summary ───────────────────────────────────────────
 
-export function formatRuleSummary(rule: PricingRule): string {
-  const category = detectRuleCategory(rule);
+export function formatRuleSummary(
+  rule: PricingRule,
+  allCategories: CategoryMeta[]
+): string {
+  const category = detectRuleCategory(rule, allCategories);
   if (!category) {
-    // Fallback for unknown rules
     return `${rule.item_kind} / ${rule.match_params}`;
   }
 
-  const meta = getCategoryMeta(category);
+  const meta = getCategoryMeta(category, allCategories);
   if (!meta) return rule.match_params;
 
-  const values = extractFormValues(rule, category);
+  const values = extractFormValues(rule, category, allCategories);
   const price = extractPrice(rule);
 
   const parts: string[] = [meta.label];
@@ -334,7 +305,6 @@ export function formatRuleSummary(rule: PricingRule): string {
   for (const field of meta.fields) {
     const val = values[field.key];
     if (val) {
-      // For selects, try to find the human label
       const opt = field.options?.find((o) => o.value === val);
       parts.push(opt ? opt.label : val);
     }
@@ -349,9 +319,10 @@ export function formatRulePreview(
   category: RuleCategory,
   fieldValues: Record<string, string>,
   price: number,
-  programName: string
+  programName: string,
+  allCategories: CategoryMeta[]
 ): string {
-  const meta = getCategoryMeta(category);
+  const meta = getCategoryMeta(category, allCategories);
   if (!meta) return "";
 
   const parts: string[] = [];
@@ -384,15 +355,20 @@ export interface RuleGroup {
   rules: PricingRule[];
 }
 
-export function groupRulesByCategory(rules: PricingRule[]): RuleGroup[] {
+export function groupRulesByCategory(
+  rules: PricingRule[],
+  allCategories: CategoryMeta[]
+): RuleGroup[] {
   const groups = new Map<string, RuleGroup>();
 
   for (const rule of rules) {
-    const category = detectRuleCategory(rule);
+    const category = detectRuleCategory(rule, allCategories);
     const key = category ?? `unknown_${rule.item_kind}`;
 
     if (!groups.has(key)) {
-      const meta = category ? getCategoryMeta(category) : null;
+      const meta = category
+        ? getCategoryMeta(category, allCategories)
+        : null;
       groups.set(key, {
         category,
         label: meta?.label ?? `${rule.item_kind} (прочие)`,
@@ -406,7 +382,7 @@ export function groupRulesByCategory(rules: PricingRule[]): RuleGroup[] {
 
   // Sort: Печать first, then Фотокниги, then Прочие
   const groupOrder = ["Печать", "Фотокниги", "Прочие"];
-  const categoryOrder = RULE_CATEGORIES.map((c) => c.key);
+  const categoryOrder = allCategories.map((c) => c.key);
 
   return Array.from(groups.values()).sort((a, b) => {
     const ga = groupOrder.indexOf(a.groupName);

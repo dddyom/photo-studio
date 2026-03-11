@@ -182,6 +182,22 @@ pub fn update_client(
 }
 
 #[tauri::command]
+pub fn list_all_clients(db: State<DbState>) -> Result<Vec<Client>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(&format!("{CLIENT_SELECT} ORDER BY is_archived ASC, name ASC"))
+        .map_err(|e| e.to_string())?;
+
+    let clients = stmt
+        .query_map([], |row| row_to_client(row))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(clients)
+}
+
+#[tauri::command]
 pub fn archive_client(db: State<DbState>, id: i64) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let affected = conn
@@ -189,6 +205,49 @@ pub fn archive_client(db: State<DbState>, id: i64) -> Result<(), String> {
             "UPDATE clients SET is_archived = 1, updated_at = datetime('now') WHERE id = ?1",
             rusqlite::params![id],
         )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err("Клиент не найден".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn unarchive_client(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute(
+            "UPDATE clients SET is_archived = 0, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err("Клиент не найден".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_client(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    // Check for orders referencing this client
+    let order_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM orders WHERE client_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if order_count > 0 {
+        return Err(format!("Нельзя удалить клиента: есть {} заказ(ов)", order_count));
+    }
+
+    let affected = conn
+        .execute("DELETE FROM clients WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
 
     if affected == 0 {

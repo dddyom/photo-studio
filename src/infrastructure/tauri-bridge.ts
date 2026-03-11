@@ -67,6 +67,54 @@ export interface ExtraOptionType {
   sort_order: number;
 }
 
+export interface CodeCatalogItem {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface PrintCategoryItem {
+  id: number;
+  code: string;
+  name: string;
+  unit: string;
+  field_type: string; // "format" | "material" | "lamination"
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface CreateCodeCatalogInput {
+  code: string;
+  name: string;
+  sort_order?: number;
+}
+
+export interface UpdateCodeCatalogInput {
+  code?: string;
+  name?: string;
+  is_active?: boolean;
+  sort_order?: number;
+}
+
+export interface CreatePrintCategoryInput {
+  code: string;
+  name: string;
+  unit?: string;
+  field_type?: string;
+  sort_order?: number;
+}
+
+export interface UpdatePrintCategoryInput {
+  code?: string;
+  name?: string;
+  unit?: string;
+  field_type?: string;
+  is_active?: boolean;
+  sort_order?: number;
+}
+
 export interface CreateCatalogInput {
   name: string;
   sort_order?: number;
@@ -210,6 +258,7 @@ export interface OrderListFilter {
 // ── Order item types ─────────────────────────────────────────────────
 
 export type ItemKind = "book" | "print" | "service" | "extra";
+export type ProductionStep = "pending" | "printed" | "assembled" | "done";
 
 export interface OrderItem {
   id: number;
@@ -224,9 +273,29 @@ export interface OrderItem {
   spec_snapshot_json: string;
   price_breakdown_json: string;
   is_cancelled: boolean;
+  production_step: ProductionStep;
   sort_order: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProductionQueueItem {
+  order_item_id: number;
+  order_id: number;
+  order_number: string;
+  client_name: string;
+  item_kind: ItemKind;
+  description: string | null;
+  qty: number;
+  production_step: ProductionStep;
+  created_at: string;
+}
+
+export interface ProductionLogEntry {
+  id: number;
+  from_step: string;
+  to_step: string;
+  changed_at: string;
 }
 
 export interface ExtraInput {
@@ -284,6 +353,13 @@ export interface AddExtraItemInput {
 export interface UpdateItemPriceInput {
   unit_price: number;
   reason: string;
+}
+
+export interface UpdateOrderItemInput {
+  qty?: number;
+  unit_price?: number;
+  description?: string;
+  manual_price_reason?: string;
 }
 
 // ── Payment types ────────────────────────────────────────────────────
@@ -483,7 +559,10 @@ export const clients = {
     invoke<Client>("create_client", { input }),
   update: (id: number, input: UpdateClientInput) =>
     invoke<Client>("update_client", { id, input }),
+  listAll: () => invoke<Client[]>("list_all_clients"),
   archive: (id: number) => invoke<void>("archive_client", { id }),
+  unarchive: (id: number) => invoke<void>("unarchive_client", { id }),
+  delete: (id: number) => invoke<void>("delete_client", { id }),
 };
 
 // ── Catalog commands ─────────────────────────────────────────────────
@@ -511,18 +590,62 @@ export const catalogs = {
   // CRUD
   createBookFormat: (input: CreateCatalogInput) => invoke<CatalogItem>("create_book_format", { input }),
   updateBookFormat: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_book_format", { id, input }),
+  deleteBookFormat: (id: number) => invoke<void>("delete_book_format", { id }),
   createPrintFormat: (input: CreateCatalogInput) => invoke<CatalogItem>("create_print_format", { input }),
   updatePrintFormat: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_print_format", { id, input }),
+  deletePrintFormat: (id: number) => invoke<void>("delete_print_format", { id }),
   createCoverType: (input: CreateCatalogInput) => invoke<CatalogItem>("create_cover_type", { input }),
   updateCoverType: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_cover_type", { id, input }),
+  deleteCoverType: (id: number) => invoke<void>("delete_cover_type", { id }),
   createCoverMaterial: (input: CreateCatalogInput) => invoke<CatalogItem>("create_cover_material", { input }),
   updateCoverMaterial: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_cover_material", { id, input }),
+  deleteCoverMaterial: (id: number) => invoke<void>("delete_cover_material", { id }),
   createLaminationType: (input: CreateCatalogInput) => invoke<CatalogItem>("create_lamination_type", { input }),
   updateLaminationType: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_lamination_type", { id, input }),
+  deleteLaminationType: (id: number) => invoke<void>("delete_lamination_type", { id }),
   createMaterial: (input: CreateMaterialInput) => invoke<MaterialItem>("create_material", { input }),
   updateMaterial: (id: number, input: UpdateCatalogInput) => invoke<MaterialItem>("update_material", { id, input }),
+  deleteMaterial: (id: number) => invoke<void>("delete_material", { id }),
   createExtraOptionType: (input: CreateExtraOptionInput) => invoke<ExtraOptionType>("create_extra_option_type", { input }),
   updateExtraOptionType: (id: number, input: UpdateExtraOptionInput) => invoke<ExtraOptionType>("update_extra_option_type", { id, input }),
+  deleteExtraOptionType: (id: number) => invoke<void>("delete_extra_option_type", { id }),
+  // v10: Dynamic pricing catalogs
+  printCategories: () => invoke<PrintCategoryItem[]>("list_print_categories"),
+  allPrintCategories: () => invoke<PrintCategoryItem[]>("list_all_print_categories"),
+  createPrintCategory: (input: CreatePrintCategoryInput) => invoke<PrintCategoryItem>("create_print_category", { input }),
+  updatePrintCategory: (id: number, input: UpdatePrintCategoryInput) => invoke<PrintCategoryItem>("update_print_category", { id, input }),
+  deletePrintCategory: (id: number) => invoke<void>("delete_print_category", { id }),
+  assemblyKinds: () => invoke<CodeCatalogItem[]>("list_assembly_kinds"),
+  allAssemblyKinds: () => invoke<CodeCatalogItem[]>("list_all_assembly_kinds"),
+  createAssemblyKind: (input: CreateCodeCatalogInput) => invoke<CodeCatalogItem>("create_assembly_kind", { input }),
+  updateAssemblyKind: (id: number, input: UpdateCodeCatalogInput) => invoke<CodeCatalogItem>("update_assembly_kind", { id, input }),
+  deleteAssemblyKind: (id: number) => invoke<void>("delete_assembly_kind", { id }),
+  coverFamilies: () => invoke<CodeCatalogItem[]>("list_cover_families"),
+  allCoverFamilies: () => invoke<CodeCatalogItem[]>("list_all_cover_families"),
+  createCoverFamily: (input: CreateCodeCatalogInput) => invoke<CodeCatalogItem>("create_cover_family", { input }),
+  updateCoverFamily: (id: number, input: UpdateCodeCatalogInput) => invoke<CodeCatalogItem>("update_cover_family", { id, input }),
+  deleteCoverFamily: (id: number) => invoke<void>("delete_cover_family", { id }),
+  bookCoverOptions: () => invoke<CatalogItem[]>("list_book_cover_options"),
+  allBookCoverOptions: () => invoke<CatalogItem[]>("list_all_book_cover_options"),
+  createBookCoverOption: (input: CreateCatalogInput) => invoke<CatalogItem>("create_book_cover_option", { input }),
+  updateBookCoverOption: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_book_cover_option", { id, input }),
+  deleteBookCoverOption: (id: number) => invoke<void>("delete_book_cover_option", { id }),
+  wideFormatMaterials: () => invoke<CatalogItem[]>("list_wide_format_materials"),
+  allWideFormatMaterials: () => invoke<CatalogItem[]>("list_all_wide_format_materials"),
+  createWideFormatMaterial: (input: CreateCatalogInput) => invoke<CatalogItem>("create_wide_format_material", { input }),
+  updateWideFormatMaterial: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_wide_format_material", { id, input }),
+  deleteWideFormatMaterial: (id: number) => invoke<void>("delete_wide_format_material", { id }),
+};
+
+// ── Production commands ──────────────────────────────────────────────
+
+export const production = {
+  advanceStep: (itemId: number) =>
+    invoke<OrderItem>("advance_production_step", { itemId }),
+  listQueue: (queue: string) =>
+    invoke<ProductionQueueItem[]>("list_production_queue", { queue }),
+  listLog: (itemId: number) =>
+    invoke<ProductionLogEntry[]>("list_production_log", { itemId }),
 };
 
 // ── Pricing commands ─────────────────────────────────────────────────
@@ -531,6 +654,7 @@ export const pricing = {
   listPrograms: () => invoke<PricingProgram[]>("list_pricing_programs"),
   createProgram: (input: CreateProgramInput) => invoke<PricingProgram>("create_pricing_program", { input }),
   updateProgram: (id: number, input: UpdateProgramInput) => invoke<PricingProgram>("update_pricing_program", { id, input }),
+  deleteProgram: (id: number) => invoke<void>("delete_pricing_program", { id }),
   listRules: (pricingProgramId: number) => invoke<PricingRule[]>("list_pricing_rules", { pricingProgramId }),
   createRule: (input: CreateRuleInput) => invoke<PricingRule>("create_pricing_rule", { input }),
   updateRule: (id: number, input: UpdateRuleInput) => invoke<PricingRule>("update_pricing_rule", { id, input }),
@@ -573,6 +697,8 @@ export const orderItems = {
     invoke<OrderItem>("cancel_order_item", { itemId }),
   updatePrice: (itemId: number, input: UpdateItemPriceInput) =>
     invoke<OrderItem>("update_order_item_price", { itemId, input }),
+  update: (itemId: number, input: UpdateOrderItemInput) =>
+    invoke<OrderItem>("update_order_item", { itemId, input }),
 };
 
 // ── Payment commands ─────────────────────────────────────────────────

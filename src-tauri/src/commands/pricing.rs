@@ -192,6 +192,44 @@ pub fn update_pricing_program(
     read_program(&conn, id)
 }
 
+#[tauri::command]
+pub fn delete_pricing_program(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let active_orders: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM orders WHERE pricing_program_id = ?1 AND production_status NOT IN ('closed', 'cancelled')",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if active_orders > 0 {
+        return Err(format!(
+            "Нельзя удалить: {active_orders} активных заказов используют эту программу"
+        ));
+    }
+
+    // Delete rules first
+    conn.execute(
+        "DELETE FROM pricing_rules WHERE pricing_program_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let affected = conn
+        .execute(
+            "DELETE FROM pricing_programs WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if affected == 0 {
+        return Err("Программа не найдена".to_string());
+    }
+
+    Ok(())
+}
+
 // ── Rule commands ────────────────────────────────────────────────────
 
 fn read_rule(conn: &Connection, id: i64) -> Result<PricingRule, String> {

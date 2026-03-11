@@ -1,10 +1,11 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import {
   pricing,
+  catalogs,
   type PricingProgram,
   type PricingRule,
   type CreateProgramInput,
@@ -13,6 +14,9 @@ import {
 } from "@/infrastructure/tauri-bridge";
 import {
   type RuleCategory,
+  type CategoryMeta,
+  type PricingCatalogs,
+  buildRuleCategories,
   detectRuleCategory,
   getCategoryMeta,
   extractFormValues,
@@ -20,6 +24,53 @@ import {
   groupRulesByCategory,
 } from "./pricing/ruleCategories";
 import { CategorySelector, RuleForm } from "./pricing/RuleForm";
+
+// ── Hook: load all pricing catalogs ─────────────────────────────────
+
+function usePricingCatalogs(): {
+  allCategories: CategoryMeta[];
+  loading: boolean;
+} {
+  const { data: printCategories } = useTauriCommand(catalogs.printCategories);
+  const { data: assemblyKinds } = useTauriCommand(catalogs.assemblyKinds);
+  const { data: coverFamilies } = useTauriCommand(catalogs.coverFamilies);
+  const { data: bookCoverOptions } = useTauriCommand(catalogs.bookCoverOptions);
+  const { data: wideFormatMaterials } = useTauriCommand(
+    catalogs.wideFormatMaterials
+  );
+  const { data: laminationTypes } = useTauriCommand(catalogs.laminationTypes);
+
+  const loading =
+    !printCategories ||
+    !assemblyKinds ||
+    !coverFamilies ||
+    !bookCoverOptions ||
+    !wideFormatMaterials ||
+    !laminationTypes;
+
+  const allCategories = useMemo(() => {
+    if (loading) return [];
+    const pricingCatalogs: PricingCatalogs = {
+      printCategories: printCategories!,
+      assemblyKinds: assemblyKinds!,
+      coverFamilies: coverFamilies!,
+      bookCoverOptions: bookCoverOptions!,
+      wideFormatMaterials: wideFormatMaterials!,
+      laminationTypes: laminationTypes!,
+    };
+    return buildRuleCategories(pricingCatalogs);
+  }, [
+    printCategories,
+    assemblyKinds,
+    coverFamilies,
+    bookCoverOptions,
+    wideFormatMaterials,
+    laminationTypes,
+    loading,
+  ]);
+
+  return { allCategories, loading };
+}
 
 // ── Main page ────────────────────────────────────────────────────────
 
@@ -32,6 +83,8 @@ export function PricingPage() {
     null
   );
   const [showCreateProgram, setShowCreateProgram] = useState(false);
+
+  const { allCategories, loading: catalogsLoading } = usePricingCatalogs();
 
   const selectedProgram = programs?.find((p) => p.id === selectedProgramId);
 
@@ -97,6 +150,17 @@ export function PricingPage() {
                       toast.error(String(err));
                     }
                   }}
+                  onDelete={async () => {
+                    if (!confirm(`Удалить программу «${p.name}» и все её правила?`)) return;
+                    try {
+                      await pricing.deleteProgram(p.id);
+                      toast.success("Программа удалена");
+                      if (selectedProgramId === p.id) setSelectedProgramId(null);
+                      refetchPrograms();
+                    } catch (err) {
+                      toast.error(String(err));
+                    }
+                  }}
                 />
               ))
             )}
@@ -106,10 +170,17 @@ export function PricingPage() {
         {/* Rules panel */}
         <div>
           {selectedProgram ? (
-            <RulesPanel
-              program={selectedProgram}
-              onProgramUpdated={refetchPrograms}
-            />
+            catalogsLoading ? (
+              <div className="bg-white border border-gray-200 rounded-md p-10 text-center text-gray-400">
+                Загрузка справочников...
+              </div>
+            ) : (
+              <RulesPanel
+                program={selectedProgram}
+                allCategories={allCategories}
+                onProgramUpdated={refetchPrograms}
+              />
+            )
           ) : (
             <div className="bg-white border border-gray-200 rounded-md p-10 text-center text-gray-400">
               Выберите программу слева
@@ -164,15 +235,17 @@ function ProgramRow({
   selected,
   onClick,
   onToggle,
+  onDelete,
 }: {
   program: PricingProgram;
   selected: boolean;
   onClick: () => void;
   onToggle: () => void;
+  onDelete: () => void;
 }) {
   return (
     <div
-      className={`px-4 py-3 cursor-pointer transition-colors ${
+      className={`px-4 py-3 cursor-pointer transition-colors group ${
         selected ? "bg-blue-50" : "hover:bg-gray-50"
       }`}
       onClick={onClick}
@@ -188,19 +261,30 @@ function ProgramRow({
             {p.rules_count} правил &middot; {p.clients_count} клиентов
           </div>
         </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggle();
-          }}
-          className={`text-xs px-2 py-0.5 rounded ${
-            p.is_active
-              ? "bg-green-100 text-green-700"
-              : "bg-gray-100 text-gray-500"
-          }`}
-        >
-          {p.is_active ? "Активна" : "Неактивна"}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
+            className={`text-xs px-2 py-0.5 rounded ${
+              p.is_active
+                ? "bg-green-100 text-green-700"
+                : "bg-gray-100 text-gray-500"
+            }`}
+          >
+            {p.is_active ? "Активна" : "Неактивна"}
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            className="text-xs text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity px-1"
+          >
+            Удл.
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -210,9 +294,11 @@ function ProgramRow({
 
 function RulesPanel({
   program,
+  allCategories,
   onProgramUpdated,
 }: {
   program: PricingProgram;
+  allCategories: CategoryMeta[];
   onProgramUpdated: () => void;
 }) {
   const fetchRules = useCallback(
@@ -247,7 +333,17 @@ function RulesPanel({
     }
   };
 
-  const ruleGroups = groupRulesByCategory(rules ?? []);
+  const ruleGroups = groupRulesByCategory(rules ?? [], allCategories);
+
+  // Group rule groups by top-level groupName (Печать, Фотокниги, etc.)
+  const topLevelGroups = useMemo(() => {
+    const map = new Map<string, typeof ruleGroups>();
+    for (const g of ruleGroups) {
+      if (!map.has(g.groupName)) map.set(g.groupName, []);
+      map.get(g.groupName)!.push(g);
+    }
+    return Array.from(map.entries());
+  }, [ruleGroups]);
 
   const handleRuleSaved = () => {
     setAddingCategory(null);
@@ -256,231 +352,277 @@ function RulesPanel({
     onProgramUpdated();
   };
 
-  return (
-    <div className="bg-white border border-gray-200 rounded-md">
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
-        <div className="flex items-center gap-2">
-          {editingName ? (
-            <input
-              value={nameValue}
-              onChange={(e) => setNameValue(e.target.value)}
-              onBlur={handleRename}
-              onKeyDown={(e) => e.key === "Enter" && handleRename()}
-              autoFocus
-              className="px-2 py-1 border border-gray-200 rounded text-sm font-semibold focus:outline-none focus:border-blue-500"
-            />
-          ) : (
-            <h2
-              className="text-base font-semibold cursor-pointer hover:text-blue-600"
-              onClick={() => {
-                setNameValue(program.name);
-                setEditingName(true);
-              }}
-            >
-              {program.name}
-            </h2>
-          )}
-        </div>
-        <div className="flex gap-2">
-          <button
-            className="text-sm text-gray-500 hover:text-blue-600"
-            onClick={() => setShowPreview(!showPreview)}
-          >
-            {showPreview ? "Скрыть" : "Предпросмотр цены"}
-          </button>
-          <button
-            className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-            onClick={() => {
-              setEditingRule(null);
-              setAddingCategory(
-                addingCategory ? null : "selecting"
-              );
-            }}
-          >
-            {addingCategory ? "Отмена" : "+ Правило"}
-          </button>
-        </div>
-      </div>
+  const startEdit = (rule: PricingRule) => {
+    const cat = detectRuleCategory(rule, allCategories);
+    if (cat) {
+      setAddingCategory(null);
+      setEditingRule({ rule, category: cat });
+    } else {
+      toast.error("Неизвестный тип правила");
+    }
+  };
 
-      {/* Preview panel */}
-      {showPreview && <PricePreviewPanel programId={program.id} />}
+  const handleToggle = async (rule: PricingRule) => {
+    try {
+      await pricing.updateRule(rule.id, { is_active: !rule.is_active });
+      refetchRules();
+      onProgramUpdated();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
 
-      {/* Category selector (step 1 of adding) */}
-      {addingCategory === "selecting" && (
-        <CategorySelector
-          onSelect={(cat) => setAddingCategory(cat)}
-          onCancel={() => setAddingCategory(null)}
-        />
-      )}
-
-      {/* Rule form (step 2 of adding, or editing) */}
-      {addingCategory && addingCategory !== "selecting" && (
-        <RuleForm
-          programId={program.id}
-          programName={program.name}
-          category={addingCategory}
-          onSaved={handleRuleSaved}
-          onCancel={() => setAddingCategory(null)}
-        />
-      )}
-
-      {editingRule && (
-        <RuleForm
-          programId={program.id}
-          programName={program.name}
-          category={editingRule.category}
-          editingRule={editingRule.rule}
-          onSaved={handleRuleSaved}
-          onCancel={() => setEditingRule(null)}
-        />
-      )}
-
-      {/* Rules list grouped by category */}
-      <div>
-        {!rules || rules.length === 0 ? (
-          <div className="text-center py-10 text-gray-400 text-sm">
-            Нет правил в этой программе
-          </div>
-        ) : (
-          <>
-            {ruleGroups.map((group, gi) => (
-              <div key={group.category ?? `unk-${gi}`}>
-                {/* Group header */}
-                <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                  <div>
-                    <span className="text-xs font-semibold text-gray-500 uppercase">
-                      {group.label}
-                    </span>
-                    <span className="text-xs text-gray-400 ml-2">
-                      {group.rules.length} правил
-                    </span>
-                  </div>
-                </div>
-                {/* Rules in group */}
-                {group.rules.map((rule) => (
-                  <RuleRow
-                    key={rule.id}
-                    rule={rule}
-                    onEdit={() => {
-                      const cat = detectRuleCategory(rule);
-                      if (cat) {
-                        setAddingCategory(null);
-                        setEditingRule({ rule, category: cat });
-                      } else {
-                        toast.error(
-                          "Неизвестный тип правила. Используйте JSON-редактирование."
-                        );
-                      }
-                    }}
-                    onUpdated={() => {
-                      refetchRules();
-                      onProgramUpdated();
-                    }}
-                  />
-                ))}
-              </div>
-            ))}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Rule row ─────────────────────────────────────────────────────────
-
-function RuleRow({
-  rule,
-  onEdit,
-  onUpdated,
-}: {
-  rule: PricingRule;
-  onEdit: () => void;
-  onUpdated: () => void;
-}) {
-  const category = detectRuleCategory(rule);
-  const meta = category ? getCategoryMeta(category) : null;
-
-  // Extract key values for compact display
-  const values = category ? extractFormValues(rule, category) : {};
-  const price = extractPrice(rule);
-
-  const handleDelete = async () => {
+  const handleDelete = async (rule: PricingRule) => {
     if (!confirm("Удалить это правило?")) return;
     try {
       await pricing.deleteRule(rule.id);
       toast.success("Правило удалено");
-      onUpdated();
+      refetchRules();
+      onProgramUpdated();
     } catch (err) {
       toast.error(String(err));
     }
   };
-
-  const handleToggle = async () => {
-    try {
-      await pricing.updateRule(rule.id, { is_active: !rule.is_active });
-      onUpdated();
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
-  // Format display value
-  const mainParam = meta
-    ? meta.fields
-        .map((f) => {
-          const val = values[f.key];
-          if (!val) return null;
-          const opt = f.options?.find((o) => o.value === val);
-          return opt ? opt.label : val;
-        })
-        .filter(Boolean)
-        .join(", ")
-    : null;
-
-  const priceDisplay = meta
-    ? `${formatMoney(price)} ${meta.unit}`
-    : `${formatMoney(price)}`;
 
   return (
-    <div
-      className={`px-5 py-2.5 flex items-center justify-between border-b border-gray-100 ${!rule.is_active ? "opacity-40" : ""}`}
-    >
-      <div className="flex-1 min-w-0">
-        <div className="text-sm flex items-center gap-2">
-          {mainParam && (
-            <span className="text-gray-700">{mainParam}</span>
-          )}
-          {mainParam && <span className="text-gray-300">&mdash;</span>}
-          <span className="font-semibold text-gray-900">{priceDisplay}</span>
+    <div className="space-y-4">
+      {/* Header card */}
+      <div className="bg-white border border-gray-200 rounded-md">
+        <div className="flex items-center justify-between px-5 py-3">
+          <div className="flex items-center gap-2">
+            {editingName ? (
+              <input
+                value={nameValue}
+                onChange={(e) => setNameValue(e.target.value)}
+                onBlur={handleRename}
+                onKeyDown={(e) => e.key === "Enter" && handleRename()}
+                autoFocus
+                className="px-2 py-1 border border-blue-400 rounded text-base font-semibold focus:outline-none focus:border-blue-500"
+              />
+            ) : (
+              <>
+                <h2 className="text-base font-semibold">{program.name}</h2>
+                <button
+                  onClick={() => {
+                    setNameValue(program.name);
+                    setEditingName(true);
+                  }}
+                  className="text-gray-400 hover:text-blue-600"
+                  title="Переименовать"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                  </svg>
+                </button>
+              </>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <button
+              className="text-sm text-gray-500 hover:text-blue-600"
+              onClick={() => setShowPreview(!showPreview)}
+            >
+              {showPreview ? "Скрыть" : "Предпросмотр цены"}
+            </button>
+            <button
+              className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+              onClick={() => {
+                setEditingRule(null);
+                setAddingCategory(addingCategory ? null : "selecting");
+              }}
+            >
+              {addingCategory ? "Отмена" : "+ Правило"}
+            </button>
+          </div>
         </div>
+
+        {/* Preview panel */}
+        {showPreview && <PricePreviewPanel programId={program.id} />}
+
+        {/* Category selector (step 1 of adding) */}
+        {addingCategory === "selecting" && (
+          <CategorySelector
+            allCategories={allCategories}
+            onSelect={(cat) => setAddingCategory(cat)}
+            onCancel={() => setAddingCategory(null)}
+          />
+        )}
+
+        {/* Rule form (step 2 of adding, or editing) */}
+        {addingCategory && addingCategory !== "selecting" && (
+          <RuleForm
+            programId={program.id}
+            programName={program.name}
+            category={addingCategory}
+            allCategories={allCategories}
+            onSaved={handleRuleSaved}
+            onCancel={() => setAddingCategory(null)}
+          />
+        )}
+
+        {editingRule && (
+          <RuleForm
+            programId={program.id}
+            programName={program.name}
+            category={editingRule.category}
+            allCategories={allCategories}
+            editingRule={editingRule.rule}
+            onSaved={handleRuleSaved}
+            onCancel={() => setEditingRule(null)}
+          />
+        )}
       </div>
-      <div className="flex items-center gap-1.5 ml-4 shrink-0">
-        <button
-          onClick={handleToggle}
-          className={`text-xs px-2 py-0.5 rounded ${
-            rule.is_active
-              ? "bg-green-100 text-green-700"
-              : "bg-gray-100 text-gray-500"
-          }`}
-        >
-          {rule.is_active ? "Вкл" : "Выкл"}
-        </button>
-        <button
-          onClick={onEdit}
-          className="text-xs text-blue-600 hover:text-blue-700 px-1"
-        >
-          Изм.
-        </button>
-        <button
-          onClick={handleDelete}
-          className="text-xs text-red-500 hover:text-red-700 px-1"
-        >
-          Удл.
-        </button>
-      </div>
+
+      {/* Rules grouped by top-level section, then category tables */}
+      {!rules || rules.length === 0 ? (
+        <div className="bg-white border border-gray-200 rounded-md text-center py-10 text-gray-400 text-sm">
+          Нет правил в этой программе
+        </div>
+      ) : (
+        topLevelGroups.map(([groupName, categories]) => (
+          <div key={groupName}>
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-2 px-1">
+              {groupName}
+            </h3>
+            <div className="space-y-3">
+              {categories.map((group, gi) => {
+                const meta = group.category
+                  ? getCategoryMeta(group.category, allCategories)
+                  : null;
+                const fields = meta?.fields ?? [];
+
+                return (
+                  <div
+                    key={group.category ?? `unk-${gi}`}
+                    className="bg-white border border-gray-200 rounded-md overflow-hidden"
+                  >
+                    {/* Category header */}
+                    <div className="px-4 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-gray-700">
+                          {group.label}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          {group.rules.length}
+                        </span>
+                      </div>
+                      {meta && (
+                        <span className="text-xs text-gray-400">{meta.unit}</span>
+                      )}
+                    </div>
+
+                    {/* Table */}
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-100 text-xs text-gray-400 uppercase">
+                          {fields.map((f) => (
+                            <th
+                              key={f.key}
+                              className="text-left font-medium px-4 py-1.5"
+                            >
+                              {f.label}
+                            </th>
+                          ))}
+                          <th className="text-right font-medium px-4 py-1.5">
+                            Цена
+                          </th>
+                          <th className="w-24 px-4 py-1.5"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {group.rules.map((rule) => (
+                          <RuleTableRow
+                            key={rule.id}
+                            rule={rule}
+                            fields={fields}
+                            category={group.category}
+                            allCategories={allCategories}
+                            onEdit={() => startEdit(rule)}
+                            onToggle={() => handleToggle(rule)}
+                            onDelete={() => handleDelete(rule)}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))
+      )}
     </div>
+  );
+}
+
+// ── Rule table row ───────────────────────────────────────────────────
+
+function RuleTableRow({
+  rule,
+  fields,
+  category,
+  allCategories,
+  onEdit,
+  onToggle,
+  onDelete,
+}: {
+  rule: PricingRule;
+  fields: { key: string; label: string; options?: { value: string; label: string }[] }[];
+  category: RuleCategory | null;
+  allCategories: CategoryMeta[];
+  onEdit: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const values = category
+    ? extractFormValues(rule, category, allCategories)
+    : {};
+  const price = extractPrice(rule);
+
+  return (
+    <tr
+      className={`group hover:bg-gray-50 ${!rule.is_active ? "opacity-40" : ""}`}
+    >
+      {fields.map((f) => {
+        const val = values[f.key];
+        const opt = f.options?.find((o) => o.value === val);
+        return (
+          <td key={f.key} className="px-4 py-2 text-gray-700">
+            {opt ? opt.label : val || "—"}
+          </td>
+        );
+      })}
+      <td className="px-4 py-2 text-right font-semibold text-gray-900 whitespace-nowrap">
+        {formatMoney(price)} ₸
+      </td>
+      <td className="px-4 py-2 text-right">
+        <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={onToggle}
+            className={`text-xs px-1.5 py-0.5 rounded ${
+              rule.is_active
+                ? "text-green-600 hover:bg-green-50"
+                : "text-gray-400 hover:bg-gray-100"
+            }`}
+            title={rule.is_active ? "Выключить" : "Включить"}
+          >
+            {rule.is_active ? "Вкл" : "Выкл"}
+          </button>
+          <button
+            onClick={onEdit}
+            className="text-xs text-blue-600 hover:text-blue-700 px-1"
+          >
+            Изм.
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-xs text-red-500 hover:text-red-700 px-1"
+          >
+            Удл.
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
 

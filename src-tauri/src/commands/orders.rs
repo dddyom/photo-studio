@@ -215,14 +215,21 @@ pub fn update_order(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order = read_order(&conn, id)?;
 
-    if order.production_status != "draft" {
-        return Err("Редактирование заголовка доступно только для черновика".to_string());
+    if order.production_status == "cancelled" {
+        return Err("Нельзя редактировать отменённый заказ".to_string());
     }
+
+    // due_date only editable in draft
+    let due_date = if order.production_status == "draft" {
+        input.due_date
+    } else {
+        order.due_date
+    };
 
     conn.execute(
         "UPDATE orders SET notes = ?1, due_date = ?2, updated_at = datetime('now')
          WHERE id = ?3",
-        rusqlite::params![input.notes, input.due_date, id],
+        rusqlite::params![input.notes, due_date, id],
     )
     .map_err(|e| e.to_string())?;
 

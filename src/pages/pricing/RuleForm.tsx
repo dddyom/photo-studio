@@ -8,7 +8,7 @@ import {
 } from "@/infrastructure/tauri-bridge";
 import {
   type RuleCategory,
-  RULE_CATEGORIES,
+  type CategoryMeta,
   getCategoryMeta,
   buildMatchParams,
   buildPriceFormula,
@@ -20,14 +20,16 @@ import {
 // ── Category selection step ──────────────────────────────────────────
 
 export function CategorySelector({
+  allCategories,
   onSelect,
   onCancel,
 }: {
+  allCategories: CategoryMeta[];
   onSelect: (category: RuleCategory) => void;
   onCancel: () => void;
 }) {
-  const groups = new Map<string, typeof RULE_CATEGORIES>();
-  for (const cat of RULE_CATEGORIES) {
+  const groups = new Map<string, CategoryMeta[]>();
+  for (const cat of allCategories) {
     if (!groups.has(cat.group)) groups.set(cat.group, []);
     groups.get(cat.group)!.push(cat);
   }
@@ -74,6 +76,7 @@ interface RuleFormProps {
   programId: number;
   programName: string;
   category: RuleCategory;
+  allCategories: CategoryMeta[];
   editingRule?: PricingRule;
   onSaved: () => void;
   onCancel: () => void;
@@ -83,15 +86,16 @@ export function RuleForm({
   programId,
   programName,
   category,
+  allCategories,
   editingRule,
   onSaved,
   onCancel,
 }: RuleFormProps) {
-  const meta = getCategoryMeta(category);
+  const meta = getCategoryMeta(category, allCategories);
 
   // Field values
   const [fieldValues, setFieldValues] = useState<Record<string, string>>(() => {
-    if (editingRule) return extractFormValues(editingRule, category);
+    if (editingRule) return extractFormValues(editingRule, category, allCategories);
     return {};
   });
   const [price, setPrice] = useState<string>(() => {
@@ -147,11 +151,11 @@ export function RuleForm({
   // Preview
   const preview =
     isValid && priceNum > 0
-      ? formatRulePreview(category, fieldValues, priceNum, programName)
+      ? formatRulePreview(category, fieldValues, priceNum, programName, allCategories)
       : null;
 
   // Generated JSON (for advanced view)
-  const generatedMatchParams = buildMatchParams(category, fieldValues);
+  const generatedMatchParams = buildMatchParams(category, fieldValues, allCategories);
   const generatedFormula = buildPriceFormula(priceNum);
 
   const handleSubmit = async (e: React.FormEvent) => {

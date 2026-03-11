@@ -12,13 +12,47 @@ import {
 } from "@/infrastructure/tauri-bridge";
 
 export function ClientsPage() {
-  const { data, loading, refetch } = useTauriCommand(clients.list);
+  const { data, loading, refetch } = useTauriCommand(clients.listAll);
   const { data: programs } = useTauriCommand(pricing.listPrograms);
   const [showForm, setShowForm] = useState(false);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [showArchived, setShowArchived] = useState(false);
 
   const activePrograms = (programs ?? []).filter((p) => p.is_active);
+
+  const handleArchive = async (c: Client) => {
+    if (!confirm(`Архивировать клиента "${c.name}"?`)) return;
+    try {
+      await clients.archive(c.id);
+      toast.success("Клиент архивирован");
+      refetch();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
+  const handleUnarchive = async (c: Client) => {
+    try {
+      await clients.unarchive(c.id);
+      toast.success("Клиент восстановлен из архива");
+      refetch();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
+  const handleDelete = async (c: Client) => {
+    if (!confirm(`Удалить клиента "${c.name}" навсегда?`)) return;
+    try {
+      await clients.delete(c.id);
+      toast.success("Клиент удалён");
+      refetch();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
+  const filtered = (data ?? []).filter((c) => showArchived || !c.is_archived);
 
   return (
     <div>
@@ -69,7 +103,7 @@ export function ClientsPage() {
       <div className="bg-white border border-gray-200 rounded-md p-5">
         {loading ? (
           <p className="text-gray-500">Загрузка...</p>
-        ) : !data || data.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="text-center py-10 text-gray-400">Нет клиентов</div>
         ) : (
           <div className="overflow-x-auto">
@@ -97,29 +131,20 @@ export function ClientsPage() {
                 </tr>
               </thead>
               <tbody>
-                {data
-                  .filter((c) => showArchived || !c.is_archived)
-                  .map((c) => (
-                    <ClientRow
-                      key={c.id}
-                      client={c}
-                      programs={programs ?? []}
-                      onEdit={() => {
-                        setEditingClient(c);
-                        setShowForm(false);
-                      }}
-                      onArchive={async () => {
-                        if (!confirm(`Архивировать клиента "${c.name}"?`)) return;
-                        try {
-                          await clients.archive(c.id);
-                          toast.success("Клиент архивирован");
-                          refetch();
-                        } catch (err) {
-                          toast.error(String(err));
-                        }
-                      }}
-                    />
-                  ))}
+                {filtered.map((c) => (
+                  <ClientRow
+                    key={c.id}
+                    client={c}
+                    programs={programs ?? []}
+                    onEdit={() => {
+                      setEditingClient(c);
+                      setShowForm(false);
+                    }}
+                    onArchive={() => handleArchive(c)}
+                    onUnarchive={() => handleUnarchive(c)}
+                    onDelete={() => handleDelete(c)}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
@@ -134,11 +159,15 @@ function ClientRow({
   programs,
   onEdit,
   onArchive,
+  onUnarchive,
+  onDelete,
 }: {
   client: Client;
   programs: PricingProgram[];
   onEdit: () => void;
   onArchive: () => void;
+  onUnarchive: () => void;
+  onDelete: () => void;
 }) {
   const programName = c.default_pricing_program_id
     ? programs.find((p) => p.id === c.default_pricing_program_id)?.name ?? "—"
@@ -146,27 +175,47 @@ function ClientRow({
 
   return (
     <tr className={`border-b border-gray-100 last:border-0 ${c.is_archived ? "opacity-50" : ""}`}>
-      <td className="px-3 py-2.5">{c.name}</td>
+      <td className="px-3 py-2.5">
+        {c.name}
+        {c.is_archived && <span className="ml-2 text-xs text-gray-400">(архив)</span>}
+      </td>
       <td className="px-3 py-2.5">{c.phone ?? "—"}</td>
       <td className="px-3 py-2.5">{c.email ?? "—"}</td>
       <td className="px-3 py-2.5 text-sm text-gray-500">{programName}</td>
       <td className="px-3 py-2.5 text-gray-500">
         {new Date(c.created_at).toLocaleDateString("ru")}
       </td>
-      <td className="px-3 py-2.5 text-right">
-        <button
-          onClick={onEdit}
-          className="text-xs text-blue-600 hover:text-blue-700 mr-3"
-        >
-          Изменить
-        </button>
-        {!c.is_archived && (
-          <button
-            onClick={onArchive}
-            className="text-xs text-red-500 hover:text-red-700"
-          >
-            Архив
-          </button>
+      <td className="px-3 py-2.5 text-right whitespace-nowrap">
+        {c.is_archived ? (
+          <>
+            <button
+              onClick={onUnarchive}
+              className="text-xs text-blue-600 hover:text-blue-700 mr-3"
+            >
+              Восстановить
+            </button>
+            <button
+              onClick={onDelete}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Удалить
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={onEdit}
+              className="text-xs text-blue-600 hover:text-blue-700 mr-3"
+            >
+              Изменить
+            </button>
+            <button
+              onClick={onArchive}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Архив
+            </button>
+          </>
         )}
       </td>
     </tr>
@@ -202,60 +251,40 @@ function CreateClientForm({
     }
   };
 
+  const inputCls = "w-full px-3 py-1.5 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15";
+
   return (
-    <div className="bg-white border border-gray-200 rounded-md p-5 mb-4">
-      <h2 className="text-base font-semibold mb-3">Новый клиент</h2>
-      <form onSubmit={handleSubmit(onSubmit)} className="max-w-lg">
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Имя *</label>
-          <input
-            {...register("name", { required: "Обязательное поле" })}
-            placeholder="Имя клиента"
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
-          {errors.name && (
-            <p className="text-red-600 text-xs mt-1">{errors.name.message}</p>
-          )}
+    <div className="bg-white border border-gray-200 rounded-md p-4 mb-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-wrap items-end gap-3">
+        <div className="min-w-[180px] flex-1">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Имя *</label>
+          <input {...register("name", { required: true })} placeholder="Имя клиента" className={inputCls} />
+          {errors.name && <p className="text-red-600 text-xs mt-0.5">Обязательное поле</p>}
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Телефон</label>
-          <input
-            {...register("phone")}
-            placeholder="+7 ..."
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[150px] w-[150px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Телефон</label>
+          <input {...register("phone")} placeholder="+7 ..." className={inputCls} />
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Email</label>
-          <input
-            {...register("email")}
-            placeholder="email@example.com"
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[180px] w-[180px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+          <input {...register("email")} placeholder="email@example.com" className={inputCls} />
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Прайс-программа</label>
-          <select
-            {...register("default_pricing_program_id", { valueAsNumber: true })}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          >
+        <div className="min-w-[160px] w-[160px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Прайс</label>
+          <select {...register("default_pricing_program_id", { valueAsNumber: true })} className={inputCls}>
             <option value="">Не выбрана</option>
             {programs.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Заметки</label>
-          <textarea
-            {...register("notes")}
-            rows={2}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[150px] flex-1">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Заметки</label>
+          <input {...register("notes")} placeholder="Заметки" className={inputCls} />
         </div>
         <button
           type="submit"
-          className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
+          className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors whitespace-nowrap"
         >
           Сохранить
         </button>
@@ -299,68 +328,43 @@ function EditClientForm({
     }
   };
 
+  const inputCls = "w-full px-3 py-1.5 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15";
+
   return (
-    <div className="bg-white border border-gray-200 rounded-md p-5 mb-4">
-      <h2 className="text-base font-semibold mb-3">
-        Редактирование: {client.name}
-      </h2>
-      <form onSubmit={handleSubmit(onSubmit)} className="max-w-lg">
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Имя</label>
-          <input
-            {...register("name")}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+    <div className="bg-white border border-blue-200 rounded-md p-4 mb-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-wrap items-end gap-3">
+        <div className="text-xs font-medium text-blue-600 w-full -mb-1">Редактирование: {client.name}</div>
+        <div className="min-w-[180px] flex-1">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Имя</label>
+          <input {...register("name")} className={inputCls} />
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Телефон</label>
-          <input
-            {...register("phone")}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[150px] w-[150px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Телефон</label>
+          <input {...register("phone")} className={inputCls} />
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Email</label>
-          <input
-            {...register("email")}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[180px] w-[180px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+          <input {...register("email")} className={inputCls} />
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Прайс-программа</label>
-          <select
-            {...register("default_pricing_program_id", { valueAsNumber: true })}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          >
+        <div className="min-w-[160px] w-[160px]">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Прайс</label>
+          <select {...register("default_pricing_program_id", { valueAsNumber: true })} className={inputCls}>
             <option value="">Не выбрана</option>
             {programs.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
         </div>
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-1">Заметки</label>
-          <textarea
-            {...register("notes")}
-            rows={2}
-            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
-          />
+        <div className="min-w-[150px] flex-1">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Заметки</label>
+          <input {...register("notes")} className={inputCls} />
         </div>
-        <div className="flex gap-2">
-          <button
-            type="submit"
-            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
-          >
-            Сохранить
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200 transition-colors"
-          >
-            Отмена
-          </button>
-        </div>
+        <button type="submit" className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors whitespace-nowrap">
+          Сохранить
+        </button>
+        <button type="button" onClick={onCancel} className="px-4 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-md hover:bg-gray-200 transition-colors whitespace-nowrap">
+          Отмена
+        </button>
       </form>
     </div>
   );

@@ -31,6 +31,60 @@ pub struct MaterialItem {
     pub sort_order: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CodeCatalogItem {
+    pub id: i64,
+    pub code: String,
+    pub name: String,
+    pub is_active: bool,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PrintCategoryItem {
+    pub id: i64,
+    pub code: String,
+    pub name: String,
+    pub unit: String,
+    pub field_type: String,
+    pub is_active: bool,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCodeCatalogInput {
+    pub code: String,
+    pub name: String,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCodeCatalogInput {
+    pub code: Option<String>,
+    pub name: Option<String>,
+    pub is_active: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePrintCategoryInput {
+    pub code: String,
+    pub name: String,
+    pub unit: Option<String>,
+    pub field_type: Option<String>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePrintCategoryInput {
+    pub code: Option<String>,
+    pub name: Option<String>,
+    pub unit: Option<String>,
+    pub field_type: Option<String>,
+    pub is_active: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateCatalogInput {
     pub name: String,
@@ -69,7 +123,7 @@ pub struct UpdateExtraOptionInput {
 // ── Generic catalog macros ───────────────────────────────────────────
 
 macro_rules! catalog_crud {
-    ($list_fn:ident, $list_all_fn:ident, $create_fn:ident, $update_fn:ident, $table:literal) => {
+    ($list_fn:ident, $list_all_fn:ident, $create_fn:ident, $update_fn:ident, $delete_fn:ident, $table:literal) => {
         #[tauri::command]
         pub fn $list_fn(db: State<DbState>) -> Result<Vec<CatalogItem>, String> {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -209,14 +263,32 @@ macro_rules! catalog_crud {
             )
             .map_err(|e| e.to_string())
         }
+
+        #[tauri::command]
+        pub fn $delete_fn(db: State<DbState>, id: i64) -> Result<(), String> {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let affected = conn
+                .execute(concat!("DELETE FROM ", $table, " WHERE id = ?1"), rusqlite::params![id])
+                .map_err(|e| {
+                    if e.to_string().contains("FOREIGN KEY") {
+                        "Невозможно удалить: запись используется в других данных".to_string()
+                    } else {
+                        e.to_string()
+                    }
+                })?;
+            if affected == 0 {
+                return Err("Запись не найдена".to_string());
+            }
+            Ok(())
+        }
     };
 }
 
-catalog_crud!(list_book_formats, list_all_book_formats, create_book_format, update_book_format, "book_formats");
-catalog_crud!(list_print_formats, list_all_print_formats, create_print_format, update_print_format, "print_formats");
-catalog_crud!(list_cover_types, list_all_cover_types, create_cover_type, update_cover_type, "cover_types");
-catalog_crud!(list_cover_materials, list_all_cover_materials, create_cover_material, update_cover_material, "cover_materials");
-catalog_crud!(list_lamination_types, list_all_lamination_types, create_lamination_type, update_lamination_type, "lamination_types");
+catalog_crud!(list_book_formats, list_all_book_formats, create_book_format, update_book_format, delete_book_format, "book_formats");
+catalog_crud!(list_print_formats, list_all_print_formats, create_print_format, update_print_format, delete_print_format, "print_formats");
+catalog_crud!(list_cover_types, list_all_cover_types, create_cover_type, update_cover_type, delete_cover_type, "cover_types");
+catalog_crud!(list_cover_materials, list_all_cover_materials, create_cover_material, update_cover_material, delete_cover_material, "cover_materials");
+catalog_crud!(list_lamination_types, list_all_lamination_types, create_lamination_type, update_lamination_type, delete_lamination_type, "lamination_types");
 
 // ── Materials (with category) ────────────────────────────────────────
 
@@ -374,6 +446,24 @@ pub fn update_material(db: State<DbState>, id: i64, input: UpdateCatalogInput) -
     .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn delete_material(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute("DELETE FROM materials WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| {
+            if e.to_string().contains("FOREIGN KEY") {
+                "Невозможно удалить: материал используется".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+    if affected == 0 {
+        return Err("Запись не найдена".to_string());
+    }
+    Ok(())
+}
+
 // ── Extra option types ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -463,6 +553,329 @@ pub fn update_extra_option_type(db: State<DbState>, id: i64, input: UpdateExtraO
         |row| Ok(ExtraOptionType { id: row.get(0)?, name: row.get(1)?, default_price: row.get(2)?, is_active: row.get(3)?, sort_order: row.get(4)? }),
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_extra_option_type(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute("DELETE FROM extra_option_types WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| {
+            if e.to_string().contains("FOREIGN KEY") {
+                "Невозможно удалить: опция используется".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+    if affected == 0 {
+        return Err("Запись не найдена".to_string());
+    }
+    Ok(())
+}
+
+// ── Simple catalogs (v10): book_cover_options, wide_format_materials ─
+
+catalog_crud!(list_book_cover_options, list_all_book_cover_options, create_book_cover_option, update_book_cover_option, delete_book_cover_option, "book_cover_options");
+catalog_crud!(list_wide_format_materials, list_all_wide_format_materials, create_wide_format_material, update_wide_format_material, delete_wide_format_material, "wide_format_materials");
+
+// ── Code-based catalogs: assembly_kinds, cover_families ─────────────
+
+macro_rules! code_catalog_crud {
+    ($list_fn:ident, $list_all_fn:ident, $create_fn:ident, $update_fn:ident, $delete_fn:ident, $table:literal) => {
+        #[tauri::command]
+        pub fn $list_fn(db: State<DbState>) -> Result<Vec<CodeCatalogItem>, String> {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(concat!(
+                    "SELECT id, code, name, is_active, sort_order FROM ", $table,
+                    " WHERE is_active = 1 ORDER BY sort_order, name"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(CodeCatalogItem {
+                        id: row.get(0)?,
+                        code: row.get(1)?,
+                        name: row.get(2)?,
+                        is_active: row.get(3)?,
+                        sort_order: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        }
+
+        #[tauri::command]
+        pub fn $list_all_fn(db: State<DbState>) -> Result<Vec<CodeCatalogItem>, String> {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(concat!(
+                    "SELECT id, code, name, is_active, sort_order FROM ", $table,
+                    " ORDER BY sort_order, name"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(CodeCatalogItem {
+                        id: row.get(0)?,
+                        code: row.get(1)?,
+                        name: row.get(2)?,
+                        is_active: row.get(3)?,
+                        sort_order: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        }
+
+        #[tauri::command]
+        pub fn $create_fn(db: State<DbState>, input: CreateCodeCatalogInput) -> Result<CodeCatalogItem, String> {
+            if input.code.trim().is_empty() {
+                return Err("Код не может быть пустым".to_string());
+            }
+            if input.name.trim().is_empty() {
+                return Err("Название не может быть пустым".to_string());
+            }
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                concat!("INSERT INTO ", $table, " (code, name, sort_order) VALUES (?1, ?2, ?3)"),
+                rusqlite::params![input.code.trim(), input.name.trim(), input.sort_order.unwrap_or(0)],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    format!("Запись с кодом '{}' уже существует", input.code)
+                } else {
+                    e.to_string()
+                }
+            })?;
+            let id = conn.last_insert_rowid();
+            conn.query_row(
+                concat!("SELECT id, code, name, is_active, sort_order FROM ", $table, " WHERE id = ?1"),
+                rusqlite::params![id],
+                |row| Ok(CodeCatalogItem {
+                    id: row.get(0)?,
+                    code: row.get(1)?,
+                    name: row.get(2)?,
+                    is_active: row.get(3)?,
+                    sort_order: row.get(4)?,
+                }),
+            )
+            .map_err(|e| e.to_string())
+        }
+
+        #[tauri::command]
+        pub fn $update_fn(db: State<DbState>, id: i64, input: UpdateCodeCatalogInput) -> Result<CodeCatalogItem, String> {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut sets: Vec<String> = Vec::new();
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut idx = 1;
+
+            if let Some(ref code) = input.code {
+                if code.trim().is_empty() { return Err("Код не может быть пустым".to_string()); }
+                sets.push(format!("code = ?{idx}")); params.push(Box::new(code.trim().to_string())); idx += 1;
+            }
+            if let Some(ref name) = input.name {
+                if name.trim().is_empty() { return Err("Название не может быть пустым".to_string()); }
+                sets.push(format!("name = ?{idx}")); params.push(Box::new(name.trim().to_string())); idx += 1;
+            }
+            if let Some(active) = input.is_active {
+                sets.push(format!("is_active = ?{idx}")); params.push(Box::new(active as i32)); idx += 1;
+            }
+            if let Some(order) = input.sort_order {
+                sets.push(format!("sort_order = ?{idx}")); params.push(Box::new(order)); idx += 1;
+            }
+            if sets.is_empty() { return Err("Нет полей для обновления".to_string()); }
+
+            let sql = format!(concat!("UPDATE ", $table, " SET {} WHERE id = ?{}"), sets.join(", "), idx);
+            params.push(Box::new(id));
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let affected = conn.execute(&sql, param_refs.as_slice()).map_err(|e| {
+                if e.to_string().contains("UNIQUE") { "Запись с таким кодом уже существует".to_string() } else { e.to_string() }
+            })?;
+            if affected == 0 { return Err("Запись не найдена".to_string()); }
+
+            conn.query_row(
+                concat!("SELECT id, code, name, is_active, sort_order FROM ", $table, " WHERE id = ?1"),
+                rusqlite::params![id],
+                |row| Ok(CodeCatalogItem {
+                    id: row.get(0)?,
+                    code: row.get(1)?,
+                    name: row.get(2)?,
+                    is_active: row.get(3)?,
+                    sort_order: row.get(4)?,
+                }),
+            )
+            .map_err(|e| e.to_string())
+        }
+
+        #[tauri::command]
+        pub fn $delete_fn(db: State<DbState>, id: i64) -> Result<(), String> {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let affected = conn
+                .execute(concat!("DELETE FROM ", $table, " WHERE id = ?1"), rusqlite::params![id])
+                .map_err(|e| {
+                    if e.to_string().contains("FOREIGN KEY") {
+                        "Невозможно удалить: запись используется в других данных".to_string()
+                    } else {
+                        e.to_string()
+                    }
+                })?;
+            if affected == 0 {
+                return Err("Запись не найдена".to_string());
+            }
+            Ok(())
+        }
+    };
+}
+
+code_catalog_crud!(list_assembly_kinds, list_all_assembly_kinds, create_assembly_kind, update_assembly_kind, delete_assembly_kind, "assembly_kinds");
+code_catalog_crud!(list_cover_families, list_all_cover_families, create_cover_family, update_cover_family, delete_cover_family, "cover_families");
+
+// ── Print categories ────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_print_categories(db: State<DbState>) -> Result<Vec<PrintCategoryItem>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, code, name, unit, field_type, is_active, sort_order FROM print_categories WHERE is_active = 1 ORDER BY sort_order, name")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PrintCategoryItem {
+                id: row.get(0)?, code: row.get(1)?, name: row.get(2)?,
+                unit: row.get(3)?, field_type: row.get(4)?,
+                is_active: row.get(5)?, sort_order: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn list_all_print_categories(db: State<DbState>) -> Result<Vec<PrintCategoryItem>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, code, name, unit, field_type, is_active, sort_order FROM print_categories ORDER BY sort_order, name")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PrintCategoryItem {
+                id: row.get(0)?, code: row.get(1)?, name: row.get(2)?,
+                unit: row.get(3)?, field_type: row.get(4)?,
+                is_active: row.get(5)?, sort_order: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn create_print_category(db: State<DbState>, input: CreatePrintCategoryInput) -> Result<PrintCategoryItem, String> {
+    if input.code.trim().is_empty() { return Err("Код не может быть пустым".to_string()); }
+    if input.name.trim().is_empty() { return Err("Название не может быть пустым".to_string()); }
+    let valid_field_types = ["format", "material", "lamination"];
+    let field_type = input.field_type.as_deref().unwrap_or("format");
+    if !valid_field_types.contains(&field_type) {
+        return Err(format!("Тип поля должен быть: {}", valid_field_types.join(", ")));
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO print_categories (code, name, unit, field_type, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![input.code.trim(), input.name.trim(), input.unit.as_deref().unwrap_or("шт."), field_type, input.sort_order.unwrap_or(0)],
+    )
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") { format!("Категория с кодом '{}' уже существует", input.code) } else { e.to_string() }
+    })?;
+    let id = conn.last_insert_rowid();
+    conn.query_row(
+        "SELECT id, code, name, unit, field_type, is_active, sort_order FROM print_categories WHERE id = ?1",
+        rusqlite::params![id],
+        |row| Ok(PrintCategoryItem {
+            id: row.get(0)?, code: row.get(1)?, name: row.get(2)?,
+            unit: row.get(3)?, field_type: row.get(4)?,
+            is_active: row.get(5)?, sort_order: row.get(6)?,
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_print_category(db: State<DbState>, id: i64, input: UpdatePrintCategoryInput) -> Result<PrintCategoryItem, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut sets: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(ref code) = input.code {
+        if code.trim().is_empty() { return Err("Код не может быть пустым".to_string()); }
+        sets.push(format!("code = ?{idx}")); params.push(Box::new(code.trim().to_string())); idx += 1;
+    }
+    if let Some(ref name) = input.name {
+        if name.trim().is_empty() { return Err("Название не может быть пустым".to_string()); }
+        sets.push(format!("name = ?{idx}")); params.push(Box::new(name.trim().to_string())); idx += 1;
+    }
+    if let Some(ref unit) = input.unit {
+        sets.push(format!("unit = ?{idx}")); params.push(Box::new(unit.clone())); idx += 1;
+    }
+    if let Some(ref field_type) = input.field_type {
+        let valid = ["format", "material", "lamination"];
+        if !valid.contains(&field_type.as_str()) {
+            return Err(format!("Тип поля должен быть: {}", valid.join(", ")));
+        }
+        sets.push(format!("field_type = ?{idx}")); params.push(Box::new(field_type.clone())); idx += 1;
+    }
+    if let Some(active) = input.is_active {
+        sets.push(format!("is_active = ?{idx}")); params.push(Box::new(active as i32)); idx += 1;
+    }
+    if let Some(order) = input.sort_order {
+        sets.push(format!("sort_order = ?{idx}")); params.push(Box::new(order)); idx += 1;
+    }
+    if sets.is_empty() { return Err("Нет полей для обновления".to_string()); }
+
+    let sql = format!("UPDATE print_categories SET {} WHERE id = ?{idx}", sets.join(", "));
+    params.push(Box::new(id));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let affected = conn.execute(&sql, param_refs.as_slice()).map_err(|e| {
+        if e.to_string().contains("UNIQUE") { "Категория с таким кодом уже существует".to_string() } else { e.to_string() }
+    })?;
+    if affected == 0 { return Err("Запись не найдена".to_string()); }
+
+    conn.query_row(
+        "SELECT id, code, name, unit, field_type, is_active, sort_order FROM print_categories WHERE id = ?1",
+        rusqlite::params![id],
+        |row| Ok(PrintCategoryItem {
+            id: row.get(0)?, code: row.get(1)?, name: row.get(2)?,
+            unit: row.get(3)?, field_type: row.get(4)?,
+            is_active: row.get(5)?, sort_order: row.get(6)?,
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_print_category(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute("DELETE FROM print_categories WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| {
+            if e.to_string().contains("FOREIGN KEY") {
+                "Невозможно удалить: категория используется".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+    if affected == 0 {
+        return Err("Запись не найдена".to_string());
+    }
+    Ok(())
 }
 
 // ── Company accounts (read-only for now) ─────────────────────────────

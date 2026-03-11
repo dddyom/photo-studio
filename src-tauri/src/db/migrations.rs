@@ -379,6 +379,111 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         -- Deactivate old demo pricing programs
         UPDATE pricing_programs SET is_active = 0 WHERE name IN ('Стандарт', 'Оптовый');
     "),
+
+    // ── v10: Dynamic catalogs for pricing ───────────────────────────────
+    (10, "dynamic catalogs for pricing options", "
+        -- Print categories (replaces hardcoded 9 categories)
+        CREATE TABLE print_categories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            code       TEXT    NOT NULL UNIQUE,
+            name       TEXT    NOT NULL,
+            unit       TEXT    NOT NULL DEFAULT 'шт.',
+            field_type TEXT    NOT NULL DEFAULT 'format',
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT INTO print_categories (code, name, unit, field_type, sort_order) VALUES
+            ('lab_print',              'Лабораторная печать',       'шт.',   'format',     1),
+            ('wide_format_print',      'Широкоформатная печать',    'пог. м', 'material',  2),
+            ('wide_format_lamination', 'Ламинация широкоформатки',  'кв. м', 'lamination', 3),
+            ('photo_lamination',       'Ламинация фото',            'шт.',   'format',     4),
+            ('photo_magnet',           'Фото на магните',           'шт.',   'format',     5),
+            ('photo_pvc',              'Фото на ПВХ',              'шт.',   'format',     6),
+            ('dsp_picture',            'Картина на ДСП',            'шт.',   'format',     7),
+            ('canvas_stretched',       'Холст на подрамнике',       'шт.',   'format',     8),
+            ('calendar_double_sided',  'Двусторонний календарь',    'шт.',   'format',     9);
+
+        -- Assembly kinds for books
+        CREATE TABLE assembly_kinds (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            code       TEXT    NOT NULL UNIQUE,
+            name       TEXT    NOT NULL,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT INTO assembly_kinds (code, name, sort_order) VALUES
+            ('plastic',   'Пластик',    1),
+            ('pvc_board', 'Картон PVC', 2);
+
+        -- Cover families for books
+        CREATE TABLE cover_families (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            code       TEXT    NOT NULL UNIQUE,
+            name       TEXT    NOT NULL,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT INTO cover_families (code, name, sort_order) VALUES
+            ('laminated_hard', 'Ламинированная твёрдая', 1),
+            ('eco_leather',    'Экокожа',                2);
+
+        -- Book cover options
+        CREATE TABLE book_cover_options (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT INTO book_cover_options (name, sort_order) VALUES
+            ('Гравировка',   1),
+            ('Фото-вставка', 2);
+
+        -- Wide format materials
+        CREATE TABLE wide_format_materials (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        INSERT INTO wide_format_materials (name, sort_order) VALUES
+            ('Фотобумага матовая 106 см, самоклейка', 1),
+            ('Печать на холсте, ширина 60 см',        2),
+            ('Печать на холсте, ширина 90 см',        3);
+
+        -- Seed lamination types (already exists as table, just add entries if empty)
+        INSERT OR IGNORE INTO lamination_types (name, sort_order) VALUES
+            ('Матовая',    1),
+            ('Глянцевая',  2),
+            ('Лён',        3),
+            ('Алмазная',   4);
+    "),
+
+    // ── v11: Per-item production step tracking ────────────────────────
+    (11, "per-item production steps", "
+        ALTER TABLE order_items ADD COLUMN production_step TEXT NOT NULL DEFAULT 'pending'
+            CHECK (production_step IN ('pending','printed','assembled','done'));
+
+        CREATE TABLE production_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_item_id INTEGER NOT NULL REFERENCES order_items(id),
+            from_step     TEXT    NOT NULL,
+            to_step       TEXT    NOT NULL,
+            changed_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_production_log_item ON production_log(order_item_id);
+        CREATE INDEX idx_production_log_time ON production_log(changed_at);
+
+        -- Backfill: items in ready/closed orders are done
+        UPDATE order_items SET production_step = 'done'
+        WHERE order_id IN (
+            SELECT id FROM orders WHERE production_status IN ('ready', 'closed')
+        ) AND is_cancelled = 0;
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

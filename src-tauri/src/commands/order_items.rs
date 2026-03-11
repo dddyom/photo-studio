@@ -22,6 +22,7 @@ pub struct OrderItem {
     pub spec_snapshot_json: String,
     pub price_breakdown_json: String,
     pub is_cancelled: bool,
+    pub production_step: String,
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
@@ -90,13 +91,25 @@ pub struct UpdateItemPriceInput {
     pub reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateOrderItemInput {
+    pub qty: Option<i32>,
+    pub unit_price: Option<f64>,
+    pub description: Option<String>,
+    pub manual_price_reason: Option<String>,
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────
+
+pub fn read_order_item_pub(conn: &Connection, id: i64) -> Result<OrderItem, String> {
+    read_order_item(conn, id)
+}
 
 fn read_order_item(conn: &Connection, id: i64) -> Result<OrderItem, String> {
     conn.query_row(
         "SELECT id, order_id, item_kind, description, qty, unit_price, total_price,
                 price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json,
-                is_cancelled, sort_order, created_at, updated_at
+                is_cancelled, production_step, sort_order, created_at, updated_at
          FROM order_items WHERE id = ?1",
         rusqlite::params![id],
         |row| {
@@ -113,9 +126,10 @@ fn read_order_item(conn: &Connection, id: i64) -> Result<OrderItem, String> {
                 spec_snapshot_json: row.get(9)?,
                 price_breakdown_json: row.get(10)?,
                 is_cancelled: row.get(11)?,
-                sort_order: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                production_step: row.get(12)?,
+                sort_order: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         },
     )
@@ -180,7 +194,7 @@ pub fn list_order_items(db: State<DbState>, order_id: i64) -> Result<Vec<OrderIt
         .prepare(
             "SELECT id, order_id, item_kind, description, qty, unit_price, total_price,
                     price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json,
-                    is_cancelled, sort_order, created_at, updated_at
+                    is_cancelled, production_step, sort_order, created_at, updated_at
              FROM order_items WHERE order_id = ?1 ORDER BY sort_order",
         )
         .map_err(|e| e.to_string())?;
@@ -200,9 +214,10 @@ pub fn list_order_items(db: State<DbState>, order_id: i64) -> Result<Vec<OrderIt
                 spec_snapshot_json: row.get(9)?,
                 price_breakdown_json: row.get(10)?,
                 is_cancelled: row.get(11)?,
-                sort_order: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                production_step: row.get(12)?,
+                sort_order: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -696,6 +711,10 @@ pub fn cancel_order_item(db: State<DbState>, item_id: i64) -> Result<OrderItem, 
         .map_err(|e| e.to_string())?;
 
         recalculate_order_total(&conn, item.order_id)?;
+
+        // Cancelling may complete the order if all remaining items are done
+        super::production::maybe_auto_complete_order(&conn, item.order_id)?;
+
         read_order_item(&conn, item_id)
     }
 }
@@ -734,6 +753,73 @@ pub fn update_order_item_price(
             price_breakdown_json = ?4, updated_at = datetime('now')
          WHERE id = ?5",
         rusqlite::params![input.unit_price, total, input.reason, breakdown.to_string(), item_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    recalculate_order_total(&conn, item.order_id)?;
+    read_order_item(&conn, item_id)
+}
+
+#[tauri::command]
+pub fn update_order_item(
+    db: State<DbState>,
+    item_id: i64,
+    input: UpdateOrderItemInput,
+) -> Result<OrderItem, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let item = read_order_item(&conn, item_id)?;
+
+    if item.is_cancelled {
+        return Err("Нельзя редактировать отменённую позицию".to_string());
+    }
+
+    let order_status = get_order_status(&conn, item.order_id)?;
+    if order_status == "cancelled" {
+        return Err("Заказ отменён".to_string());
+    }
+
+    let new_qty = input.qty.unwrap_or(item.qty);
+    if new_qty < 1 {
+        return Err("Количество должно быть >= 1".to_string());
+    }
+
+    let price_changed = input.unit_price.is_some();
+    let new_unit_price = input.unit_price.unwrap_or(item.unit_price);
+    let new_total = new_unit_price * new_qty as f64;
+
+    // Description only for service/extra
+    let new_description = if let Some(ref desc) = input.description {
+        if item.item_kind != "service" && item.item_kind != "extra" {
+            return Err("Описание можно менять только у услуг и доп. опций".to_string());
+        }
+        desc.clone()
+    } else {
+        item.description.clone().unwrap_or_default()
+    };
+
+    let (new_price_source, new_reason) = if price_changed {
+        let reason = input.manual_price_reason.clone()
+            .unwrap_or_else(|| item.manual_price_reason.clone().unwrap_or_default());
+        if reason.trim().is_empty() {
+            return Err("Укажите причину ручной цены".to_string());
+        }
+        ("manual".to_string(), Some(reason))
+    } else {
+        (item.price_source.clone(), item.manual_price_reason.clone())
+    };
+
+    conn.execute(
+        "UPDATE order_items SET
+            qty = ?1, unit_price = ?2, total_price = ?3,
+            description = ?4, price_source = ?5, manual_price_reason = ?6,
+            updated_at = datetime('now')
+         WHERE id = ?7",
+        rusqlite::params![
+            new_qty, new_unit_price, new_total,
+            new_description, new_price_source, new_reason,
+            item_id
+        ],
     )
     .map_err(|e| e.to_string())?;
 

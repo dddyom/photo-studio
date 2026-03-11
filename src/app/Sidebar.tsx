@@ -1,8 +1,8 @@
 import { NavLink } from "react-router-dom";
 
 const NAV_ITEMS = [
-  { to: "/dashboard", label: "Главная", icon: "📊" },
   { to: "/orders", label: "Заказы", icon: "📋" },
+  { to: "/production", label: "Производство", icon: "🔧" },
   { to: "/clients", label: "Клиенты", icon: "👥" },
   { to: "/pricing", label: "Прайсы", icon: "💰" },
   { to: "/catalogs", label: "Справочники", icon: "📚" },

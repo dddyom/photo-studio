@@ -3,6 +3,7 @@ import type {
   PaymentStatus,
   DeliveryStatus,
   ItemKind,
+  ProductionStep,
 } from "@/infrastructure/tauri-bridge";
 
 export const PRODUCTION_STATUS_LABELS: Record<ProductionStatus, string> = {
@@ -33,6 +34,35 @@ export const ITEM_KIND_LABELS: Record<ItemKind, string> = {
   service: "Услуга",
   extra: "Доп. опция",
 };
+
+export const PRODUCTION_STEP_LABELS: Record<ProductionStep, string> = {
+  pending: "Ожидает",
+  printed: "Напечатано",
+  assembled: "Собрано",
+  done: "Готово",
+};
+
+export function productionStepColor(s: ProductionStep): string {
+  switch (s) {
+    case "pending": return "bg-gray-100 text-gray-600";
+    case "printed": return "bg-blue-100 text-blue-700";
+    case "assembled": return "bg-yellow-100 text-yellow-800";
+    case "done": return "bg-green-100 text-green-700";
+  }
+}
+
+export function nextStepLabel(kind: ItemKind, current: ProductionStep): string | null {
+  const chains: Record<ItemKind, ProductionStep[]> = {
+    book: ["pending", "printed", "assembled", "done"],
+    print: ["pending", "printed", "done"],
+    service: ["pending", "done"],
+    extra: ["pending", "done"],
+  };
+  const steps = chains[kind];
+  const idx = steps.indexOf(current);
+  if (idx < 0 || idx >= steps.length - 1) return null;
+  return PRODUCTION_STEP_LABELS[steps[idx + 1]];
+}
 
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   cash: "Наличные",

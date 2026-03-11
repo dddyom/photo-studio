@@ -1,14 +1,672 @@
-import { Routes, Route } from "react-router-dom";
-import { OrdersListPage } from "./orders/OrdersListPage";
-import { OrderCreatePage } from "./orders/OrderCreatePage";
-import { OrderDetailPage } from "./orders/OrderDetailPage";
+import { useState, useCallback, useEffect } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import toast from "react-hot-toast";
+import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
+import {
+  orders,
+  orderItems,
+  orderPayments,
+  production,
+  clients,
+  pricing,
+  system,
+  type Order,
+  type OrderItem,
+  type OrderListFilter,
+} from "@/infrastructure/tauri-bridge";
+import {
+  PRODUCTION_STATUS_LABELS,
+  PAYMENT_STATUS_LABELS,
+  DELIVERY_STATUS_LABELS,
+  ITEM_KIND_LABELS,
+  PRODUCTION_STEP_LABELS,
+  productionStatusColor,
+  paymentStatusColor,
+  deliveryStatusColor,
+  productionStepColor,
+  nextStepLabel,
+  formatMoney,
+  formatDate,
+  formatDateTime,
+} from "@/shared/orderLabels";
+import { AddItemPanel } from "./orders/components/AddItemPanel";
+import { PaymentModal } from "./orders/components/PaymentModal";
+import { DeliveryModal } from "./orders/components/DeliveryModal";
+import { OrderPrintView } from "./orders/components/OrderPrintView";
+
+// ── Quick filter logic ──────────────────────────────────────────────
+
+type QuickFilter = "all" | "in_work" | "ready" | "unpaid" | "delivered_unpaid";
+
+const QUICK_FILTERS: { key: QuickFilter; label: string }[] = [
+  { key: "all", label: "Все" },
+  { key: "in_work", label: "В работе" },
+  { key: "ready", label: "Готовые" },
+  { key: "unpaid", label: "Не оплачены" },
+  { key: "delivered_unpaid", label: "Выданы, долг" },
+];
+
+function quickFilterToApi(qf: QuickFilter): OrderListFilter {
+  switch (qf) {
+    case "in_work": return { production_status: "in_work" };
+    case "ready": return { production_status: "ready" };
+    case "unpaid": return { unpaid_only: true };
+    case "delivered_unpaid": return { delivered_but_unpaid: true };
+    default: return {};
+  }
+}
+
+function StatusBadge({ label, color }: { label: string; color: string }) {
+  return (
+    <span className={`inline-block px-1.5 py-0.5 text-xs font-medium rounded ${color}`}>
+      {label}
+    </span>
+  );
+}
+
+// ── Main page component ─────────────────────────────────────────────
 
 export function OrdersPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const selectedId = id === "new" ? null : id ? Number(id) : null;
+  const isCreating = id === "new";
+
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
+  const [search, setSearch] = useState("");
+
+  const filter = quickFilterToApi(quickFilter);
+  const fetchOrders = useCallback(() => orders.list(filter), [quickFilter]);
+  const { data: orderList, loading: listLoading, refetch: refetchList } = useTauriCommand(fetchOrders, [quickFilter]);
+
+  const filtered = (orderList ?? []).filter((o) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return o.number.toLowerCase().includes(q) || (o.client_name ?? "").toLowerCase().includes(q);
+  });
+
   return (
-    <Routes>
-      <Route index element={<OrdersListPage />} />
-      <Route path="new" element={<OrderCreatePage />} />
-      <Route path=":id" element={<OrderDetailPage />} />
-    </Routes>
+    <div className="flex gap-0 -m-6 h-[calc(100vh)] overflow-hidden">
+      {/* Left: order list */}
+      <div className="w-[380px] shrink-0 flex flex-col border-r border-gray-200 bg-gray-50/50">
+        <div className="p-4 pb-3 border-b border-gray-200 bg-white">
+          <div className="flex items-center justify-between mb-3">
+            <h1 className="text-lg font-semibold">Заказы</h1>
+            <div className="flex gap-1.5">
+              <button
+                className="px-2.5 py-1 border border-gray-200 bg-white text-xs rounded hover:bg-gray-50 transition-colors"
+                onClick={async () => {
+                  try {
+                    const path = await system.exportOrdersCsv();
+                    toast.success(`Экспорт: ${path}`, { duration: 5000 });
+                  } catch (err) { toast.error(String(err)); }
+                }}
+              >
+                CSV
+              </button>
+              <button
+                className="px-2.5 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors"
+                onClick={() => navigate("/orders/new")}
+              >
+                + Заказ
+              </button>
+            </div>
+          </div>
+          <div className="flex gap-1 flex-wrap mb-2">
+            {QUICK_FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setQuickFilter(f.key)}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  quickFilter === f.key
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Поиск..."
+            className="w-full px-2.5 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/15"
+          />
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {listLoading ? (
+            <p className="text-gray-400 text-sm p-4">Загрузка...</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-gray-400 text-sm p-4 text-center">Нет заказов</p>
+          ) : (
+            filtered.map((o) => (
+              <div
+                key={o.id}
+                onClick={() => navigate(`/orders/${o.id}`)}
+                className={`px-4 py-2.5 border-b border-gray-100 cursor-pointer transition-colors ${
+                  selectedId === o.id
+                    ? "bg-blue-50 border-l-2 border-l-blue-600"
+                    : "hover:bg-white border-l-2 border-l-transparent"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="font-mono text-sm font-medium">{o.number}</span>
+                  <span className="text-xs text-gray-400">{formatDate(o.created_at)}</span>
+                </div>
+                <div className="text-sm text-gray-600 mb-1 truncate">
+                  {o.client_name ?? "Без клиента"}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <StatusBadge
+                    label={PRODUCTION_STATUS_LABELS[o.production_status]}
+                    color={productionStatusColor(o.production_status)}
+                  />
+                  {o.debt_amount > 0 && (
+                    <span className="text-xs text-red-600 font-mono">
+                      долг {formatMoney(o.debt_amount)}
+                    </span>
+                  )}
+                  <span className="text-xs text-gray-400 ml-auto font-mono">
+                    {formatMoney(o.total_amount)} ₸
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Right: detail or create */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {isCreating ? (
+          <CreateOrderPanel
+            onCreated={(newId) => { refetchList(); navigate(`/orders/${newId}`); }}
+            onCancel={() => navigate("/orders")}
+          />
+        ) : selectedId ? (
+          <OrderDetail orderId={selectedId} onOrderChanged={refetchList} />
+        ) : (
+          <div className="flex items-center justify-center h-full text-gray-400">
+            Выберите заказ или создайте новый
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Create order panel (compact inline) ─────────────────────────────
+
+function CreateOrderPanel({
+  onCreated, onCancel,
+}: {
+  onCreated: (id: number) => void;
+  onCancel: () => void;
+}) {
+  const { data: clientList } = useTauriCommand(clients.list);
+  const { data: programs } = useTauriCommand(pricing.listPrograms);
+
+  const [clientId, setClientId] = useState<number | "">("");
+  const [pricingProgramId, setPricingProgramId] = useState<number | "">("");
+  const [notes, setNotes] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (clientId && clientList) {
+      const c = clientList.find((cl) => cl.id === clientId);
+      if (c?.default_pricing_program_id) setPricingProgramId(c.default_pricing_program_id);
+    }
+  }, [clientId, clientList]);
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!clientId) { toast.error("Выберите клиента"); return; }
+    setSubmitting(true);
+    try {
+      const order = await orders.create({
+        client_id: clientId as number,
+        pricing_program_id: pricingProgramId || null,
+        notes: notes || null,
+        due_date: dueDate || null,
+      });
+      toast.success(`Заказ ${order.number} создан`);
+      onCreated(order.id);
+    } catch (err) { toast.error(String(err)); }
+    finally { setSubmitting(false); }
+  };
+
+  const inp = "w-full px-3 py-1.5 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15";
+
+  return (
+    <div className="max-w-xl">
+      <h2 className="text-lg font-semibold mb-4">Новый заказ</h2>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-gray-500 mb-1">Клиент *</label>
+            <select value={clientId} onChange={(e) => setClientId(e.target.value ? Number(e.target.value) : "")} className={inp}>
+              <option value="">— Выберите —</option>
+              {(clientList ?? []).map((c) => (
+                <option key={c.id} value={c.id}>{c.name}{c.phone ? ` (${c.phone})` : ""}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Прайс</label>
+            <select value={pricingProgramId} onChange={(e) => setPricingProgramId(e.target.value ? Number(e.target.value) : "")} className={inp}>
+              <option value="">— Не выбрана —</option>
+              {(programs ?? []).filter((p) => p.is_active).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Готовность</label>
+            <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className={inp} />
+          </div>
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-gray-500 mb-1">Заметки</label>
+            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Комментарий" className={inp} />
+          </div>
+        </div>
+        <div className="flex gap-2 pt-1">
+          <button type="submit" disabled={submitting} className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50">
+            {submitting ? "..." : "Создать"}
+          </button>
+          <button type="button" onClick={onCancel} className="px-4 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">
+            Отмена
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ── Order detail ────────────────────────────────────────────────────
+
+function OrderDetail({
+  orderId, onOrderChanged,
+}: {
+  orderId: number;
+  onOrderChanged: () => void;
+}) {
+  const fetchOrder = useCallback(() => orders.get(orderId), [orderId]);
+  const fetchItems = useCallback(() => orderItems.list(orderId), [orderId]);
+  const fetchPayments = useCallback(() => orderPayments.list(orderId), [orderId]);
+  const fetchDeliveries = useCallback(() => orderPayments.listDeliveries(orderId), [orderId]);
+
+  const { data: order, loading, refetch: refetchOrder } = useTauriCommand(fetchOrder, [orderId]);
+  const { data: items, refetch: refetchItems } = useTauriCommand(fetchItems, [orderId]);
+  const { data: payments, refetch: refetchPayments } = useTauriCommand(fetchPayments, [orderId]);
+  const { data: deliveries, refetch: refetchDeliveries } = useTauriCommand(fetchDeliveries, [orderId]);
+
+  const [itemPanelMode, setItemPanelMode] = useState<"add" | OrderItem | null>(null);
+  const [showPayment, setShowPayment] = useState(false);
+  const [showDelivery, setShowDelivery] = useState(false);
+  const [showPrint, setShowPrint] = useState<"receipt" | "production" | null>(null);
+
+  const refetchAll = () => {
+    refetchOrder();
+    refetchItems();
+    refetchPayments();
+    refetchDeliveries();
+    onOrderChanged();
+  };
+
+  if (loading || !order) {
+    return <p className="text-gray-500">Загрузка...</p>;
+  }
+
+  const isDraft = order.production_status === "draft";
+  const isCancelled = order.production_status === "cancelled";
+  const activeItems = (items ?? []).filter((i) => !i.is_cancelled);
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="mb-4 flex items-start justify-between">
+        <div>
+          <h2 className="text-xl font-semibold">Заказ {order.number}</h2>
+          <p className="text-gray-500 text-sm mt-0.5">
+            {order.client_name} &middot; {formatDate(order.created_at)}
+            {order.due_date && <span> &middot; Готовность: {formatDate(order.due_date)}</span>}
+          </p>
+        </div>
+        <div className="flex gap-1.5">
+          {!isCancelled && (
+            <button onClick={() => setShowPrint("receipt")} className="px-2.5 py-1 border border-gray-200 bg-white text-xs rounded hover:bg-gray-50">Квитанция</button>
+          )}
+          {!isCancelled && !isDraft && (
+            <button onClick={() => setShowPrint("production")} className="px-2.5 py-1 border border-gray-200 bg-white text-xs rounded hover:bg-gray-50">Наряд</button>
+          )}
+        </div>
+      </div>
+
+      {/* Status bar */}
+      <div className="flex items-center gap-2 mb-4">
+        <StatusBadge label={PRODUCTION_STATUS_LABELS[order.production_status]} color={productionStatusColor(order.production_status)} />
+        <StatusBadge label={PAYMENT_STATUS_LABELS[order.payment_status]} color={paymentStatusColor(order.payment_status)} />
+        <StatusBadge label={DELIVERY_STATUS_LABELS[order.delivery_status]} color={deliveryStatusColor(order.delivery_status)} />
+      </div>
+
+      {/* Actions */}
+      {!isCancelled && (
+        <ActionBar order={order} onRefresh={refetchAll} onAddItem={() => setItemPanelMode("add")} onPayment={() => setShowPayment(true)} onDelivery={() => setShowDelivery(true)} />
+      )}
+
+      {/* Content */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+        {/* Items */}
+        <div className="lg:col-span-2 space-y-4">
+          <div className="bg-white border border-gray-200 rounded-md p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Позиции</h3>
+              {isDraft && (
+                <button onClick={() => setItemPanelMode("add")} className="text-sm text-blue-600 hover:text-blue-700">+ Добавить</button>
+              )}
+            </div>
+            {activeItems.length === 0 ? (
+              <p className="text-gray-400 text-sm py-4 text-center">Нет позиций</p>
+            ) : (
+              <div className="space-y-2">
+                {(items ?? []).map((item) => (
+                  <ItemRow
+                    key={item.id}
+                    item={item}
+                    isCancelled={isCancelled}
+                    showSteps={!isDraft && !isCancelled}
+                    onEdit={() => setItemPanelMode(item)}
+                    onCancel={async () => {
+                      if (!confirm(`Удалить позицию "${item.description || ITEM_KIND_LABELS[item.item_kind]}"?`)) return;
+                      try {
+                        await orderItems.cancel(item.id);
+                        toast.success("Позиция удалена");
+                        refetchAll();
+                      } catch (err) { toast.error(String(err)); }
+                    }}
+                    onAdvance={async () => {
+                      try {
+                        await production.advanceStep(item.id);
+                        refetchAll();
+                      } catch (err) { toast.error(String(err)); }
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {!isCancelled && (
+            <NotesBlock order={order} onSaved={refetchAll} />
+          )}
+          {isCancelled && order.notes && (
+            <div className="bg-white border border-gray-200 rounded-md p-4">
+              <h3 className="text-base font-semibold mb-2">Заметки</h3>
+              <p className="text-sm text-gray-700 whitespace-pre-wrap">{order.notes}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Right: summary + payments + deliveries */}
+        <div className="space-y-4">
+          <div className="bg-white border border-gray-200 rounded-md p-4">
+            <h3 className="text-base font-semibold mb-3">Итого</h3>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Сумма заказа</span>
+                <span className="font-mono font-medium">{formatMoney(order.total_amount)} ₸</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Оплачено</span>
+                <span className="font-mono">{formatMoney(order.paid_amount)} ₸</span>
+              </div>
+              {order.debt_amount > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Остаток</span>
+                  <span className="font-mono text-red-600 font-medium">{formatMoney(order.debt_amount)} ₸</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-md p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Оплаты</h3>
+              {!isCancelled && (
+                <button onClick={() => setShowPayment(true)} className="text-sm text-blue-600 hover:text-blue-700">+ Оплата</button>
+              )}
+            </div>
+            {!payments || payments.length === 0 ? (
+              <p className="text-gray-400 text-sm">Нет оплат</p>
+            ) : (
+              <div className="space-y-1.5 text-sm">
+                {payments.map((p) => (
+                  <div key={p.id} className="flex justify-between py-1 border-b border-gray-50 last:border-0">
+                    <span className="text-gray-600">{formatDateTime(p.paid_at)}</span>
+                    <span className="font-mono">+{formatMoney(p.amount)} ₸</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-md p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Выдача</h3>
+              {!isCancelled && !isDraft && (
+                <button onClick={() => setShowDelivery(true)} className="text-sm text-blue-600 hover:text-blue-700">+ Выдать</button>
+              )}
+            </div>
+            {!deliveries || deliveries.length === 0 ? (
+              <p className="text-gray-400 text-sm">Не выдан</p>
+            ) : (
+              <div className="space-y-1.5 text-sm">
+                {deliveries.map((d) => (
+                  <div key={d.id} className="py-1 border-b border-gray-50 last:border-0">
+                    <span className="text-gray-600">{formatDateTime(d.delivered_at)}</span>
+                    {d.delivered_by && <span className="text-gray-500 ml-2">({d.delivered_by})</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Modals */}
+      {itemPanelMode && (
+        <AddItemPanel
+          orderId={orderId}
+          editItem={itemPanelMode === "add" ? undefined : itemPanelMode}
+          onClose={() => setItemPanelMode(null)}
+          onAdded={refetchAll}
+        />
+      )}
+      {showPayment && (
+        <PaymentModal order={order} onClose={() => setShowPayment(false)} onDone={refetchAll} />
+      )}
+      {showDelivery && (
+        <DeliveryModal order={order} onClose={() => setShowDelivery(false)} onDone={refetchAll} />
+      )}
+      {showPrint && (
+        <OrderPrintView order={order} items={items ?? []} payments={payments ?? []} type={showPrint} onClose={() => setShowPrint(null)} />
+      )}
+    </div>
+  );
+}
+
+// ── Notes block ─────────────────────────────────────────────────────
+
+function NotesBlock({ order, onSaved }: { order: Order; onSaved: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(order.notes ?? "");
+  const [saving, setSaving] = useState(false);
+
+  // Sync when order changes
+  useEffect(() => { setText(order.notes ?? ""); setEditing(false); }, [order.id, order.notes]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await orders.update(order.id, { notes: text || null, due_date: order.due_date });
+      toast.success("Заметки сохранены");
+      setEditing(false);
+      onSaved();
+    } catch (err) { toast.error(String(err)); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-md p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-base font-semibold">Заметки</h3>
+        {!editing && (
+          <button onClick={() => setEditing(true)} className="text-xs text-gray-500 hover:text-blue-600">Изм.</button>
+        )}
+      </div>
+      {editing ? (
+        <div>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={3}
+            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
+            autoFocus
+          />
+          <div className="flex gap-2 mt-2">
+            <button onClick={save} disabled={saving} className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 disabled:opacity-50">
+              {saving ? "..." : "Сохранить"}
+            </button>
+            <button onClick={() => { setText(order.notes ?? ""); setEditing(false); }} className="px-3 py-1 bg-gray-100 text-gray-700 text-xs rounded hover:bg-gray-200">
+              Отмена
+            </button>
+          </div>
+        </div>
+      ) : order.notes ? (
+        <p className="text-sm text-gray-700 whitespace-pre-wrap">{order.notes}</p>
+      ) : (
+        <p className="text-sm text-gray-400 italic">Нет заметок</p>
+      )}
+    </div>
+  );
+}
+
+// ── Action bar ──────────────────────────────────────────────────────
+
+function ActionBar({
+  order, onRefresh, onAddItem, onPayment, onDelivery,
+}: {
+  order: Order;
+  onRefresh: () => void;
+  onAddItem: () => void;
+  onPayment: () => void;
+  onDelivery: () => void;
+}) {
+  const nextStatus = getNextProductionStatus(order.production_status);
+
+  const changeStatus = async (status: string) => {
+    try {
+      if (status === "cancelled") {
+        if (!confirm("Отменить заказ?")) return;
+        await orders.cancel(order.id);
+      } else if (status === "confirmed") {
+        await orders.confirm(order.id);
+      } else {
+        await orders.updateProductionStatus(order.id, status);
+      }
+      toast.success(`Статус: ${PRODUCTION_STATUS_LABELS[status as keyof typeof PRODUCTION_STATUS_LABELS] ?? status}`);
+      onRefresh();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {order.production_status === "draft" && (
+        <button onClick={onAddItem} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors">+ Позиция</button>
+      )}
+      {nextStatus && (
+        <button onClick={() => changeStatus(nextStatus)} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors">
+          {PRODUCTION_STATUS_LABELS[nextStatus as keyof typeof PRODUCTION_STATUS_LABELS] ?? nextStatus}
+        </button>
+      )}
+      <button onClick={onPayment} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Оплата</button>
+      {!["draft", "cancelled"].includes(order.production_status) && (
+        <button onClick={onDelivery} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Выдать</button>
+      )}
+      {["draft", "confirmed", "in_work"].includes(order.production_status) && (
+        <button onClick={() => changeStatus("cancelled")} className="px-3 py-1.5 text-red-600 border border-red-200 bg-white text-sm rounded-md hover:bg-red-50 transition-colors">Отменить</button>
+      )}
+    </div>
+  );
+}
+
+function getNextProductionStatus(current: string): string | null {
+  switch (current) {
+    case "draft": return "confirmed";
+    case "confirmed": return "in_work";
+    case "in_work": return "ready";
+    case "ready": return "closed";
+    default: return null;
+  }
+}
+
+// ── Item row ────────────────────────────────────────────────────────
+
+function ItemRow({
+  item, isCancelled: orderCancelled, showSteps, onEdit, onCancel, onAdvance,
+}: {
+  item: OrderItem;
+  isCancelled: boolean;
+  showSteps: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onAdvance: () => void;
+}) {
+  const next = nextStepLabel(item.item_kind, item.production_step);
+
+  return (
+    <div className={`flex items-start justify-between py-2 px-3 rounded border ${
+      item.is_cancelled ? "border-gray-100 bg-gray-50 opacity-60 line-through" : "border-gray-100"
+    }`}>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-1.5 py-0.5 bg-gray-100 rounded text-gray-600">
+            {ITEM_KIND_LABELS[item.item_kind]}
+          </span>
+          {showSteps && !item.is_cancelled && (
+            <span className={`text-xs px-1.5 py-0.5 rounded ${productionStepColor(item.production_step)}`}>
+              {PRODUCTION_STEP_LABELS[item.production_step]}
+            </span>
+          )}
+          {item.price_source === "manual" && (
+            <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">Ручная цена</span>
+          )}
+        </div>
+        <p className="text-sm mt-1">{item.description || "—"}</p>
+      </div>
+      <div className="text-right ml-4 shrink-0">
+        <div className="text-sm font-mono">
+          {item.qty} x {formatMoney(item.unit_price)} = <span className="font-medium">{formatMoney(item.total_price)} ₸</span>
+        </div>
+        <div className="flex items-center justify-end gap-2 mt-1">
+          {showSteps && !item.is_cancelled && next && (
+            <button onClick={(e) => { e.stopPropagation(); onAdvance(); }}
+              className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700">{next}</button>
+          )}
+          {!item.is_cancelled && !orderCancelled && (
+            <>
+              <button onClick={(e) => { e.stopPropagation(); onEdit(); }}
+                className="text-xs text-gray-500 hover:text-blue-600">Изм.</button>
+              <button onClick={(e) => { e.stopPropagation(); onCancel(); }}
+                className="text-xs text-red-500 hover:text-red-600">Удл.</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
