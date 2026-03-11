@@ -1,0 +1,429 @@
+use rusqlite::Connection;
+
+/// Each migration: (version, description, sql).
+///
+/// Rules:
+/// - Append new migrations at the end with the next version number.
+/// - Never modify or remove already-applied migrations.
+/// - The `_migrations` table is bootstrapped before this list is consulted.
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    // ── v1: Foundation ──────────────────────────────────────────────
+    (1, "foundation tables", "
+        CREATE TABLE app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE partners (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT    NOT NULL,
+            profit_share REAL    NOT NULL DEFAULT 0.5,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE company_accounts (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT    NOT NULL,
+            account_type TEXT    NOT NULL CHECK (account_type IN ('cash','card','bank')),
+            balance      REAL    NOT NULL DEFAULT 0,
+            is_active    INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+    "),
+
+    // ── v2: Product catalogs ────────────────────────────────────────
+    (2, "product catalog tables", "
+        CREATE TABLE book_formats (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE print_formats (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE materials (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL,
+            category   TEXT    NOT NULL CHECK (category IN ('block','print','finishing')),
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE cover_types (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE cover_materials (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE lamination_types (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL UNIQUE,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE extra_option_types (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT    NOT NULL UNIQUE,
+            default_price REAL,
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            sort_order    INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE finance_categories (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT    NOT NULL,
+            category_type TEXT    NOT NULL CHECK (category_type IN ('income','expense')),
+            is_system     INTEGER NOT NULL DEFAULT 0,
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            sort_order    INTEGER NOT NULL DEFAULT 0
+        );
+    "),
+
+    // ── v3: Pricing ─────────────────────────────────────────────────
+    (3, "pricing tables", "
+        CREATE TABLE pricing_programs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT    NOT NULL,
+            is_active  INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE pricing_rules (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            pricing_program_id INTEGER NOT NULL REFERENCES pricing_programs(id),
+            item_kind          TEXT    NOT NULL CHECK (item_kind IN ('book','print','service','extra')),
+            match_params       TEXT    NOT NULL DEFAULT '{}',
+            price_formula      TEXT    NOT NULL DEFAULT '{}',
+            is_active          INTEGER NOT NULL DEFAULT 1,
+            created_at         TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_pricing_rules_program ON pricing_rules(pricing_program_id);
+    "),
+
+    // ── v4: Clients ─────────────────────────────────────────────────
+    (4, "clients table", "
+        CREATE TABLE clients (
+            id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                       TEXT    NOT NULL,
+            phone                      TEXT,
+            email                      TEXT,
+            default_pricing_program_id INTEGER REFERENCES pricing_programs(id),
+            notes                      TEXT,
+            created_at                 TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at                 TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_clients_name ON clients(name);
+    "),
+
+    // ── v5: Orders core ─────────────────────────────────────────────
+    (5, "orders and order items", "
+        CREATE TABLE orders (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            number             TEXT    NOT NULL UNIQUE,
+            client_id          INTEGER NOT NULL REFERENCES clients(id),
+            pricing_program_id INTEGER REFERENCES pricing_programs(id),
+            production_status  TEXT    NOT NULL DEFAULT 'draft'
+                CHECK (production_status IN ('draft','confirmed','in_work','ready','closed','cancelled')),
+            payment_status     TEXT    NOT NULL DEFAULT 'unpaid'
+                CHECK (payment_status IN ('unpaid','partial','paid','overpaid')),
+            delivery_status    TEXT    NOT NULL DEFAULT 'not_delivered'
+                CHECK (delivery_status IN ('not_delivered','partially_delivered','delivered')),
+            total_amount       REAL    NOT NULL DEFAULT 0,
+            paid_amount        REAL    NOT NULL DEFAULT 0,
+            notes              TEXT,
+            due_date           TEXT,
+            created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at         TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_orders_client      ON orders(client_id);
+        CREATE INDEX idx_orders_prod_status ON orders(production_status);
+        CREATE INDEX idx_orders_pay_status  ON orders(payment_status);
+        CREATE INDEX idx_orders_created     ON orders(created_at);
+
+        CREATE TABLE order_items (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id             INTEGER NOT NULL REFERENCES orders(id),
+            item_kind            TEXT    NOT NULL CHECK (item_kind IN ('book','print','service','extra')),
+            description          TEXT,
+            qty                  INTEGER NOT NULL DEFAULT 1,
+            unit_price           REAL    NOT NULL DEFAULT 0,
+            total_price          REAL    NOT NULL DEFAULT 0,
+            price_source         TEXT    NOT NULL DEFAULT 'auto'
+                CHECK (price_source IN ('auto','manual')),
+            manual_price_reason  TEXT,
+            spec_snapshot_json   TEXT    NOT NULL DEFAULT '{}',
+            price_breakdown_json TEXT    NOT NULL DEFAULT '{}',
+            is_cancelled         INTEGER NOT NULL DEFAULT 0,
+            sort_order           INTEGER NOT NULL DEFAULT 0,
+            created_at           TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at           TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_order_items_order ON order_items(order_id);
+
+        CREATE TABLE order_item_books (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_item_id     INTEGER NOT NULL UNIQUE REFERENCES order_items(id),
+            book_format_id    INTEGER REFERENCES book_formats(id),
+            spread_count      INTEGER NOT NULL DEFAULT 10,
+            block_material_id INTEGER REFERENCES materials(id),
+            cover_type_id     INTEGER REFERENCES cover_types(id),
+            cover_material_id INTEGER REFERENCES cover_materials(id),
+            lamination_id     INTEGER REFERENCES lamination_types(id)
+        );
+
+        CREATE TABLE order_item_prints (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_item_id     INTEGER NOT NULL UNIQUE REFERENCES order_items(id),
+            print_format_id   INTEGER REFERENCES print_formats(id),
+            print_material_id INTEGER REFERENCES materials(id),
+            finishing_id      INTEGER REFERENCES materials(id)
+        );
+
+        CREATE TABLE order_item_extras (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_item_id        INTEGER NOT NULL REFERENCES order_items(id),
+            extra_option_type_id INTEGER REFERENCES extra_option_types(id),
+            custom_name          TEXT,
+            qty                  INTEGER NOT NULL DEFAULT 1,
+            unit_price           REAL    NOT NULL DEFAULT 0,
+            total_price          REAL    NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX idx_order_item_extras_item ON order_item_extras(order_item_id);
+    "),
+
+    // ── v6: Finance ─────────────────────────────────────────────────
+    // Must come before order operations (payments reference finance_transactions)
+    (6, "finance tables", "
+        CREATE TABLE finance_transactions (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_type      TEXT    NOT NULL
+                CHECK (transaction_type IN (
+                    'order_payment_in','order_refund_out',
+                    'other_income_in','company_expense_out',
+                    'transfer_between_accounts',
+                    'supplier_debt_opened','supplier_debt_paid',
+                    'partner_paid_company_expense','company_reimbursed_partner',
+                    'partner_profit_payout','partner_draw',
+                    'adjustment'
+                )),
+            amount                REAL    NOT NULL CHECK (amount >= 0),
+            direction             TEXT    NOT NULL CHECK (direction IN ('in','out','none')),
+            account_id            INTEGER REFERENCES company_accounts(id),
+            counter_account_id    INTEGER REFERENCES company_accounts(id),
+            linked_transaction_id INTEGER REFERENCES finance_transactions(id),
+            order_id              INTEGER REFERENCES orders(id),
+            liability_id          INTEGER,
+            partner_id            INTEGER REFERENCES partners(id),
+            finance_category_id   INTEGER REFERENCES finance_categories(id),
+            description           TEXT,
+            transaction_date      TEXT    NOT NULL DEFAULT (date('now')),
+            created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_fin_tx_type    ON finance_transactions(transaction_type);
+        CREATE INDEX idx_fin_tx_date    ON finance_transactions(transaction_date);
+        CREATE INDEX idx_fin_tx_account ON finance_transactions(account_id);
+        CREATE INDEX idx_fin_tx_order   ON finance_transactions(order_id);
+
+        CREATE TABLE liabilities (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            liability_type    TEXT    NOT NULL CHECK (liability_type IN ('supplier_debt','other')),
+            counterparty_name TEXT    NOT NULL,
+            description       TEXT,
+            original_amount   REAL    NOT NULL,
+            paid_amount       REAL    NOT NULL DEFAULT 0,
+            status            TEXT    NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open','paid','cancelled')),
+            opened_at         TEXT    NOT NULL DEFAULT (date('now')),
+            due_date          TEXT,
+            created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at        TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_liabilities_status ON liabilities(status);
+
+        CREATE TABLE partner_settlement_entries (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            partner_id             INTEGER NOT NULL REFERENCES partners(id),
+            entry_type             TEXT    NOT NULL
+                CHECK (entry_type IN (
+                    'contribution','reimbursement',
+                    'profit_accrual','profit_payout',
+                    'draw','adjustment'
+                )),
+            amount                 REAL    NOT NULL,
+            finance_transaction_id INTEGER REFERENCES finance_transactions(id),
+            description            TEXT,
+            period                 TEXT,
+            created_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_partner_settle_partner ON partner_settlement_entries(partner_id);
+        CREATE INDEX idx_partner_settle_period  ON partner_settlement_entries(period);
+
+        CREATE TABLE closing_periods (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            period        TEXT    NOT NULL UNIQUE,
+            total_income  REAL    NOT NULL DEFAULT 0,
+            total_expense REAL    NOT NULL DEFAULT 0,
+            profit        REAL    NOT NULL DEFAULT 0,
+            status        TEXT    NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open','closed')),
+            closed_at     TEXT,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+    "),
+
+    // ── v7: Order operations ────────────────────────────────────────
+    (7, "order payments, refunds, deliveries", "
+        CREATE TABLE order_payments (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id               INTEGER NOT NULL REFERENCES orders(id),
+            amount                 REAL    NOT NULL,
+            payment_method         TEXT    NOT NULL CHECK (payment_method IN ('cash','card','bank_transfer')),
+            account_id             INTEGER NOT NULL REFERENCES company_accounts(id),
+            finance_transaction_id INTEGER REFERENCES finance_transactions(id),
+            notes                  TEXT,
+            paid_at                TEXT    NOT NULL DEFAULT (datetime('now')),
+            created_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_order_payments_order ON order_payments(order_id);
+
+        CREATE TABLE order_refunds (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id               INTEGER NOT NULL REFERENCES orders(id),
+            amount                 REAL    NOT NULL,
+            payment_method         TEXT    NOT NULL CHECK (payment_method IN ('cash','card','bank_transfer')),
+            account_id             INTEGER NOT NULL REFERENCES company_accounts(id),
+            finance_transaction_id INTEGER REFERENCES finance_transactions(id),
+            reason                 TEXT,
+            refunded_at            TEXT    NOT NULL DEFAULT (datetime('now')),
+            created_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_order_refunds_order ON order_refunds(order_id);
+
+        CREATE TABLE order_deliveries (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id     INTEGER NOT NULL REFERENCES orders(id),
+            delivered_by TEXT,
+            notes        TEXT,
+            delivered_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_order_deliveries_order ON order_deliveries(order_id);
+    "),
+
+    // ── v8: Client archiving ──────────────────────────────────────────
+    (8, "add is_archived to clients", "
+        ALTER TABLE clients ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;
+    "),
+
+    // ── v9: Real pricing support ──────────────────────────────────────
+    (9, "extend books with assembly_kind and cover_family, add catalog entries", "
+        -- Book detail: assembly kind and cover family for composite pricing
+        ALTER TABLE order_item_books ADD COLUMN assembly_kind TEXT;
+        ALTER TABLE order_item_books ADD COLUMN cover_family TEXT;
+
+        -- New book formats needed for real price list
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('15x15', 1);
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('15x20', 2);
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('20x25', 6);
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('20x27', 7);
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('21x30', 9);
+        INSERT OR IGNORE INTO book_formats (name, sort_order) VALUES ('30x43', 14);
+
+        -- New print formats needed for real price list
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('7x10', 1);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('15x20', 3);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('15x22', 5);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('15x23', 6);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('20x33', 8);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('20x40', 9);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('20x60', 10);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x41', 12);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x42', 13);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x43', 14);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x44', 15);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x60', 17);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x80', 18);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('30x90', 19);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('40x60', 20);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('50x70', 21);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('60x90', 22);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('100x100', 23);
+        INSERT OR IGNORE INTO print_formats (name, sort_order) VALUES ('100x150', 24);
+
+        -- Deactivate old demo pricing programs
+        UPDATE pricing_programs SET is_active = 0 WHERE name IN ('Стандарт', 'Оптовый');
+    "),
+];
+
+/// Bootstrap the migrations tracking table and apply pending migrations.
+pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            version     INTEGER PRIMARY KEY,
+            description TEXT    NOT NULL,
+            applied_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+        );"
+    )?;
+
+    let current_version: i32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM _migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    log::info!("DB schema version: {current_version}");
+
+    for &(version, description, sql) in MIGRATIONS {
+        if version <= current_version {
+            continue;
+        }
+        log::info!("Applying migration v{version}: {description}");
+        conn.execute_batch(sql)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, description) VALUES (?1, ?2)",
+            rusqlite::params![version, description],
+        )?;
+    }
+
+    let new_version: i32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM _migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if new_version > current_version {
+        log::info!("Migrated to v{new_version}");
+    }
+
+    Ok(())
+}
