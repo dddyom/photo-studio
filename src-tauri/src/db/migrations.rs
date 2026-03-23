@@ -484,6 +484,103 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
             SELECT id FROM orders WHERE production_status IN ('ready', 'closed')
         ) AND is_cancelled = 0;
     "),
+    (12, "add folder_path to orders", "
+        ALTER TABLE orders ADD COLUMN folder_path TEXT;
+    "),
+
+    // ── v13: Normalize pricing rules JSON ────────────────────────────────
+    (13, "normalize pricing rules JSON for consistent matching", "
+        UPDATE pricing_rules SET
+            match_params = json(match_params),
+            price_formula = json(price_formula);
+    "),
+
+    // ── v14: Remove confirmed status, merge into in_work ──────────────
+    (14, "merge confirmed status into in_work", "
+        UPDATE orders SET production_status = 'in_work'
+        WHERE production_status = 'confirmed';
+    "),
+
+    // ── v15: Production step flags on print categories ────────────────
+    (15, "add has_printing and has_assembly to print_categories, category to order_item_prints", "
+        ALTER TABLE print_categories ADD COLUMN has_printing INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE print_categories ADD COLUMN has_assembly INTEGER NOT NULL DEFAULT 0;
+
+        -- Backfill: lamination categories don't need printing
+        UPDATE print_categories SET has_printing = 0
+        WHERE code IN ('wide_format_lamination', 'photo_lamination');
+
+        -- Categories that need assembly
+        UPDATE print_categories SET has_assembly = 1
+        WHERE code IN ('photo_magnet', 'photo_pvc', 'dsp_picture', 'canvas_stretched');
+
+        -- Store category on order_item_prints for production step lookup
+        ALTER TABLE order_item_prints ADD COLUMN category TEXT;
+
+        -- Backfill category from spec_snapshot_json
+        UPDATE order_item_prints SET category = (
+            SELECT json_extract(oi.spec_snapshot_json, '$.category')
+            FROM order_items oi WHERE oi.id = order_item_prints.order_item_id
+        );
+    "),
+
+    // ── v16: Cover families rework ──────────────────────────────────
+    (16, "rework cover families: needs_lamination flag, cover options scoping", "
+        -- Add needs_lamination flag to cover_families
+        ALTER TABLE cover_families ADD COLUMN needs_lamination INTEGER NOT NULL DEFAULT 0;
+
+        -- Add missing cover families
+        INSERT OR IGNORE INTO cover_families (code, name, sort_order, needs_lamination)
+            VALUES ('plain', 'Обычная', 0, 0);
+        INSERT OR IGNORE INTO cover_families (code, name, sort_order, needs_lamination)
+            VALUES ('laminated', 'С ламинацией', 1, 1);
+
+        -- Update existing families
+        UPDATE cover_families SET needs_lamination = 1 WHERE code = 'laminated_hard';
+        UPDATE cover_families SET name = 'С ламинацией твёрдая', sort_order = 2
+            WHERE code = 'laminated_hard';
+        UPDATE cover_families SET sort_order = 3 WHERE code = 'eco_leather';
+
+        -- Scope cover options to a specific cover family
+        ALTER TABLE book_cover_options ADD COLUMN cover_family_code TEXT;
+        UPDATE book_cover_options SET cover_family_code = 'eco_leather';
+
+        -- Add missing lamination type
+        INSERT OR IGNORE INTO lamination_types (name, sort_order) VALUES ('Кожа', 5);
+    "),
+
+    // ── v17: Unify cover options — lamination types become cover options ─
+    (17, "unify cover options: join table for families, lamination as options", "
+        -- Join table: one option can belong to multiple cover families
+        CREATE TABLE cover_option_families (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            cover_option_id     INTEGER NOT NULL REFERENCES book_cover_options(id) ON DELETE CASCADE,
+            cover_family_code   TEXT    NOT NULL,
+            UNIQUE(cover_option_id, cover_family_code)
+        );
+
+        -- Migrate existing cover_family_code data into the join table
+        INSERT OR IGNORE INTO cover_option_families (cover_option_id, cover_family_code)
+            SELECT id, cover_family_code FROM book_cover_options WHERE cover_family_code IS NOT NULL;
+
+        -- Add lamination type options (no price — purely informational)
+        INSERT OR IGNORE INTO book_cover_options (name, sort_order) VALUES ('Глянцевая', 10);
+        INSERT OR IGNORE INTO book_cover_options (name, sort_order) VALUES ('Матовая', 11);
+        INSERT OR IGNORE INTO book_cover_options (name, sort_order) VALUES ('Лён', 12);
+        INSERT OR IGNORE INTO book_cover_options (name, sort_order) VALUES ('Алмазная', 13);
+        INSERT OR IGNORE INTO book_cover_options (name, sort_order) VALUES ('Кожа', 14);
+
+        -- Link lamination options to both laminated families
+        INSERT OR IGNORE INTO cover_option_families (cover_option_id, cover_family_code)
+            SELECT id, 'laminated' FROM book_cover_options WHERE name IN ('Глянцевая', 'Матовая', 'Лён', 'Алмазная', 'Кожа');
+        INSERT OR IGNORE INTO cover_option_families (cover_option_id, cover_family_code)
+            SELECT id, 'laminated_hard' FROM book_cover_options WHERE name IN ('Глянцевая', 'Матовая', 'Лён', 'Алмазная', 'Кожа');
+    "),
+
+    // ── v18: Note on order items ────────────────────────────────────────
+    (18, "add note column to order_items", "
+        ALTER TABLE order_items ADD COLUMN note TEXT;
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

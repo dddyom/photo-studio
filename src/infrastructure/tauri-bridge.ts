@@ -75,6 +75,22 @@ export interface CodeCatalogItem {
   sort_order: number;
 }
 
+export interface CoverFamilyItem {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface BookCoverOptionItem {
+  id: number;
+  name: string;
+  is_active: boolean;
+  sort_order: number;
+  cover_family_codes: string[];
+}
+
 export interface PrintCategoryItem {
   id: number;
   code: string;
@@ -83,6 +99,8 @@ export interface PrintCategoryItem {
   field_type: string; // "format" | "material" | "lamination"
   is_active: boolean;
   sort_order: number;
+  has_printing: boolean;
+  has_assembly: boolean;
 }
 
 export interface CreateCodeCatalogInput {
@@ -104,6 +122,8 @@ export interface CreatePrintCategoryInput {
   unit?: string;
   field_type?: string;
   sort_order?: number;
+  has_printing?: boolean;
+  has_assembly?: boolean;
 }
 
 export interface UpdatePrintCategoryInput {
@@ -113,6 +133,8 @@ export interface UpdatePrintCategoryInput {
   field_type?: string;
   is_active?: boolean;
   sort_order?: number;
+  has_printing?: boolean;
+  has_assembly?: boolean;
 }
 
 export interface CreateCatalogInput {
@@ -166,6 +188,7 @@ export interface PricingRule {
 
 export interface CreateProgramInput {
   name: string;
+  source_program_id?: number | null;
 }
 
 export interface UpdateProgramInput {
@@ -199,6 +222,33 @@ export interface CalculatedPrice {
   breakdown_json: string;
 }
 
+export interface CategoryPricesInput {
+  pricing_program_id: number;
+  item_kind: string;
+  category: string;
+  field_key: string;
+  values: string[];
+}
+
+export interface CategoryPriceEntry {
+  value: string;
+  unit_price: number;
+}
+
+export interface BookPricesInput {
+  pricing_program_id: number;
+  assembly_kind: string;
+  cover_family: string;
+  format_names: string[];
+  cover_option_names: string[];
+}
+
+export interface BookPrices {
+  block_per_spread: CategoryPriceEntry[];
+  cover: CategoryPriceEntry[];
+  cover_options: CategoryPriceEntry[];
+}
+
 // ── Order types ──────────────────────────────────────────────────────
 
 export type ProductionStatus =
@@ -228,6 +278,7 @@ export interface Order {
   debt_amount: number;
   notes: string | null;
   due_date: string | null;
+  folder_path: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -237,11 +288,13 @@ export interface CreateOrderInput {
   pricing_program_id?: number | null;
   notes?: string | null;
   due_date?: string | null;
+  folder_path?: string | null;
 }
 
 export interface UpdateOrderInput {
   notes?: string | null;
   due_date?: string | null;
+  folder_path?: string | null;
 }
 
 export interface OrderListFilter {
@@ -274,6 +327,7 @@ export interface OrderItem {
   price_breakdown_json: string;
   is_cancelled: boolean;
   production_step: ProductionStep;
+  note: string | null;
   sort_order: number;
   created_at: string;
   updated_at: string;
@@ -288,6 +342,7 @@ export interface ProductionQueueItem {
   description: string | null;
   qty: number;
   production_step: ProductionStep;
+  folder_path: string | null;
   created_at: string;
 }
 
@@ -315,10 +370,10 @@ export interface AddBookItemInput {
   block_material_id?: number | null;
   cover_type_id?: number | null;
   cover_material_id?: number | null;
-  lamination_id?: number | null;
   qty: number;
   manual_price?: number | null;
   manual_price_reason?: string | null;
+  note?: string | null;
   extras?: ExtraInput[] | null;
 }
 
@@ -333,6 +388,7 @@ export interface AddPrintItemInput {
   qty: number;
   manual_price?: number | null;
   manual_price_reason?: string | null;
+  note?: string | null;
 }
 
 export interface AddServiceItemInput {
@@ -340,6 +396,7 @@ export interface AddServiceItemInput {
   description: string;
   qty: number;
   unit_price: number;
+  note?: string | null;
 }
 
 export interface AddExtraItemInput {
@@ -348,6 +405,7 @@ export interface AddExtraItemInput {
   custom_name?: string | null;
   qty: number;
   unit_price?: number | null;
+  note?: string | null;
 }
 
 export interface UpdateItemPriceInput {
@@ -537,7 +595,6 @@ export const system = {
   getSettings: () => invoke<AppSettings>("get_settings"),
   updateSetting: (key: string, value: string) =>
     invoke<void>("update_setting", { key, value }),
-  seedDemoData: () => invoke<string>("seed_demo_data"),
   createBackup: () => invoke<BackupInfo>("create_backup"),
   listBackups: () => invoke<BackupInfo[]>("list_backups"),
   restoreBackup: (filename: string) =>
@@ -548,6 +605,7 @@ export const system = {
   exportTransactionsCsv: () => invoke<string>("export_transactions_csv"),
   exportPartnerSettlementsCsv: () =>
     invoke<string>("export_partner_settlements_csv"),
+  openFolder: (path: string) => invoke<void>("open_folder", { path }),
 };
 
 // ── Client commands ──────────────────────────────────────────────────
@@ -579,6 +637,8 @@ export const catalogs = {
   finishingMaterials: () => invoke<CatalogItem[]>("list_finishing_materials"),
   extraOptionTypes: () => invoke<ExtraOptionType[]>("list_extra_option_types"),
   companyAccounts: () => invoke<CatalogItem[]>("list_company_accounts"),
+  popularPrintFormats: () => invoke<{ name: string; count: number }[]>("popular_print_formats"),
+  popularBookFormats: () => invoke<{ name: string; count: number }[]>("popular_book_formats"),
   // All (for admin)
   allBookFormats: () => invoke<CatalogItem[]>("list_all_book_formats"),
   allPrintFormats: () => invoke<CatalogItem[]>("list_all_print_formats"),
@@ -620,16 +680,18 @@ export const catalogs = {
   createAssemblyKind: (input: CreateCodeCatalogInput) => invoke<CodeCatalogItem>("create_assembly_kind", { input }),
   updateAssemblyKind: (id: number, input: UpdateCodeCatalogInput) => invoke<CodeCatalogItem>("update_assembly_kind", { id, input }),
   deleteAssemblyKind: (id: number) => invoke<void>("delete_assembly_kind", { id }),
-  coverFamilies: () => invoke<CodeCatalogItem[]>("list_cover_families"),
-  allCoverFamilies: () => invoke<CodeCatalogItem[]>("list_all_cover_families"),
+  coverFamilies: () => invoke<CoverFamilyItem[]>("list_cover_families"),
+  allCoverFamilies: () => invoke<CoverFamilyItem[]>("list_all_cover_families"),
   createCoverFamily: (input: CreateCodeCatalogInput) => invoke<CodeCatalogItem>("create_cover_family", { input }),
   updateCoverFamily: (id: number, input: UpdateCodeCatalogInput) => invoke<CodeCatalogItem>("update_cover_family", { id, input }),
   deleteCoverFamily: (id: number) => invoke<void>("delete_cover_family", { id }),
-  bookCoverOptions: () => invoke<CatalogItem[]>("list_book_cover_options"),
-  allBookCoverOptions: () => invoke<CatalogItem[]>("list_all_book_cover_options"),
+  bookCoverOptions: () => invoke<BookCoverOptionItem[]>("list_book_cover_options"),
+  allBookCoverOptions: () => invoke<BookCoverOptionItem[]>("list_all_book_cover_options"),
   createBookCoverOption: (input: CreateCatalogInput) => invoke<CatalogItem>("create_book_cover_option", { input }),
   updateBookCoverOption: (id: number, input: UpdateCatalogInput) => invoke<CatalogItem>("update_book_cover_option", { id, input }),
   deleteBookCoverOption: (id: number) => invoke<void>("delete_book_cover_option", { id }),
+  setCoverOptionFamilies: (cover_option_id: number, cover_family_codes: string[]) =>
+    invoke<void>("set_cover_option_families", { input: { cover_option_id, cover_family_codes } }),
   wideFormatMaterials: () => invoke<CatalogItem[]>("list_wide_format_materials"),
   allWideFormatMaterials: () => invoke<CatalogItem[]>("list_all_wide_format_materials"),
   createWideFormatMaterial: (input: CreateCatalogInput) => invoke<CatalogItem>("create_wide_format_material", { input }),
@@ -660,6 +722,8 @@ export const pricing = {
   updateRule: (id: number, input: UpdateRuleInput) => invoke<PricingRule>("update_pricing_rule", { id, input }),
   deleteRule: (id: number) => invoke<void>("delete_pricing_rule", { id }),
   previewPrice: (input: PricePreviewInput) => invoke<CalculatedPrice>("preview_price", { input }),
+  listCategoryPrices: (input: CategoryPricesInput) => invoke<CategoryPriceEntry[]>("list_category_prices", { input }),
+  listBookPrices: (input: BookPricesInput) => invoke<BookPrices>("list_book_prices", { input }),
 };
 
 // ── Order commands ───────────────────────────────────────────────────
@@ -699,6 +763,8 @@ export const orderItems = {
     invoke<OrderItem>("update_order_item_price", { itemId, input }),
   update: (itemId: number, input: UpdateOrderItemInput) =>
     invoke<OrderItem>("update_order_item", { itemId, input }),
+  updateNote: (itemId: number, note: string | null) =>
+    invoke<OrderItem>("update_order_item_note", { itemId, note }),
 };
 
 // ── Payment commands ─────────────────────────────────────────────────

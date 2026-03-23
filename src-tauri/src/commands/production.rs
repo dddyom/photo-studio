@@ -16,6 +16,7 @@ pub struct ProductionQueueItem {
     pub description: Option<String>,
     pub qty: i32,
     pub production_step: String,
+    pub folder_path: Option<String>,
     pub created_at: String,
 }
 
@@ -29,20 +30,32 @@ pub struct ProductionLogEntry {
 
 // ── Step chain logic ─────────────────────────────────────────────────
 
-fn valid_steps(item_kind: &str) -> &'static [&'static str] {
-    match item_kind {
-        "book" => &["pending", "printed", "assembled", "done"],
-        "print" => &["pending", "printed", "done"],
-        "service" => &["pending", "done"],
-        "extra" => &["pending", "done"],
-        _ => &["pending", "done"],
+fn steps_for_flags(has_printing: bool, has_assembly: bool) -> &'static [&'static str] {
+    match (has_printing, has_assembly) {
+        (true, true) => &["pending", "printed", "assembled", "done"],
+        (true, false) => &["pending", "printed", "done"],
+        (false, true) => &["pending", "assembled", "done"],
+        (false, false) => &["pending", "done"],
     }
 }
 
-fn next_step(item_kind: &str, current: &str) -> Option<&'static str> {
-    let steps = valid_steps(item_kind);
+fn next_step_with_flags(current: &str, has_printing: bool, has_assembly: bool) -> Option<&'static str> {
+    let steps = steps_for_flags(has_printing, has_assembly);
     let pos = steps.iter().position(|&s| s == current)?;
     steps.get(pos + 1).copied()
+}
+
+/// Look up production step flags for a print item from its category.
+fn print_item_flags(conn: &Connection, item_id: i64) -> (bool, bool) {
+    conn.query_row(
+        "SELECT COALESCE(pc.has_printing, 1), COALESCE(pc.has_assembly, 0)
+         FROM order_item_prints oip
+         LEFT JOIN print_categories pc ON pc.code = oip.category
+         WHERE oip.order_item_id = ?1",
+        rusqlite::params![item_id],
+        |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+    )
+    .unwrap_or((true, false))
 }
 
 // ── Auto-complete order when all items done ──────────────────────────
@@ -57,7 +70,7 @@ pub fn maybe_auto_complete_order(conn: &Connection, order_id: i64) -> Result<(),
         )
         .map_err(|e| e.to_string())?;
 
-    if status != "in_work" && status != "confirmed" {
+    if status != "in_work" {
         return Ok(());
     }
 
@@ -124,24 +137,22 @@ pub fn advance_production_step(
         .map_err(|e| e.to_string())?;
 
     if order_status == "draft" {
-        return Err("Заказ ещё не подтверждён".to_string());
+        return Err("Заказ ещё не начат".to_string());
     }
     if order_status == "cancelled" {
         return Err("Заказ отменён".to_string());
     }
 
-    // Compute next step
-    let next = next_step(&item_kind, &current_step)
-        .ok_or_else(|| "Позиция уже завершена".to_string())?;
+    // Determine step flags based on item kind
+    let (has_printing, has_assembly) = match item_kind.as_str() {
+        "book" => (true, true),
+        "print" => print_item_flags(&conn, item_id),
+        _ => (false, false),
+    };
 
-    // Auto-transition order confirmed → in_work
-    if order_status == "confirmed" {
-        conn.execute(
-            "UPDATE orders SET production_status = 'in_work', updated_at = datetime('now') WHERE id = ?1",
-            rusqlite::params![order_id],
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    // Compute next step
+    let mut next = next_step_with_flags(&current_step, has_printing, has_assembly)
+        .ok_or_else(|| "Позиция уже завершена".to_string())?;
 
     // Advance step
     conn.execute(
@@ -156,6 +167,21 @@ pub fn advance_production_step(
         rusqlite::params![item_id, current_step, next],
     )
     .map_err(|e| e.to_string())?;
+
+    // Auto-advance to "done": when reaching the penultimate step
+    if next != "done" && next_step_with_flags(next, has_printing, has_assembly) == Some("done") {
+        conn.execute(
+            "UPDATE order_items SET production_step = 'done', updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![item_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO production_log (order_item_id, from_step, to_step) VALUES (?1, ?2, 'done')",
+            rusqlite::params![item_id, next],
+        )
+        .map_err(|e| e.to_string())?;
+        next = "done";
+    }
 
     // Auto-complete order if all items done
     if next == "done" {
@@ -188,13 +214,14 @@ pub fn list_production_queue(
     let sql = format!(
         "SELECT oi.id, o.id, o.number,
                 COALESCE(c.name, 'Без клиента'), oi.item_kind,
-                oi.description, oi.qty, oi.production_step, oi.created_at
+                oi.description, oi.qty, oi.production_step,
+                o.folder_path, oi.created_at
          FROM order_items oi
          JOIN orders o ON o.id = oi.order_id
          LEFT JOIN clients c ON c.id = o.client_id
          WHERE {kind_filter} AND {step_filter}
            AND oi.is_cancelled = 0
-           AND o.production_status IN ('confirmed', 'in_work')
+           AND o.production_status = 'in_work'
          ORDER BY o.created_at ASC"
     );
 
@@ -210,7 +237,8 @@ pub fn list_production_queue(
                 description: row.get(5)?,
                 qty: row.get(6)?,
                 production_step: row.get(7)?,
-                created_at: row.get(8)?,
+                folder_path: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?

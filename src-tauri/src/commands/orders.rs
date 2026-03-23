@@ -21,6 +21,7 @@ pub struct Order {
     pub debt_amount: f64,
     pub notes: Option<String>,
     pub due_date: Option<String>,
+    pub folder_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -31,12 +32,14 @@ pub struct CreateOrderInput {
     pub pricing_program_id: Option<i64>,
     pub notes: Option<String>,
     pub due_date: Option<String>,
+    pub folder_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateOrderInput {
     pub notes: Option<String>,
     pub due_date: Option<String>,
+    pub folder_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +61,7 @@ fn read_order(conn: &Connection, id: i64) -> Result<Order, String> {
         "SELECT o.id, o.number, o.client_id, c.name, o.pricing_program_id,
                 o.production_status, o.payment_status, o.delivery_status,
                 o.total_amount, o.paid_amount, o.notes, o.due_date,
-                o.created_at, o.updated_at
+                o.folder_path, o.created_at, o.updated_at
          FROM orders o
          LEFT JOIN clients c ON c.id = o.client_id
          WHERE o.id = ?1",
@@ -80,8 +83,9 @@ fn read_order(conn: &Connection, id: i64) -> Result<Order, String> {
                 debt_amount: (total - paid).max(0.0),
                 notes: row.get(10)?,
                 due_date: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                folder_path: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         },
     )
@@ -190,9 +194,9 @@ pub fn create_order(db: State<DbState>, input: CreateOrderInput) -> Result<Order
     let number = generate_order_number(&conn)?;
 
     conn.execute(
-        "INSERT INTO orders (number, client_id, pricing_program_id, notes, due_date)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![number, input.client_id, pricing_program_id, input.notes, input.due_date],
+        "INSERT INTO orders (number, client_id, pricing_program_id, notes, due_date, folder_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![number, input.client_id, pricing_program_id, input.notes, input.due_date, input.folder_path],
     )
     .map_err(|e| e.to_string())?;
 
@@ -227,9 +231,9 @@ pub fn update_order(
     };
 
     conn.execute(
-        "UPDATE orders SET notes = ?1, due_date = ?2, updated_at = datetime('now')
-         WHERE id = ?3",
-        rusqlite::params![input.notes, due_date, id],
+        "UPDATE orders SET notes = ?1, due_date = ?2, folder_path = ?3, updated_at = datetime('now')
+         WHERE id = ?4",
+        rusqlite::params![input.notes, due_date, input.folder_path, id],
     )
     .map_err(|e| e.to_string())?;
 
@@ -242,11 +246,11 @@ pub fn confirm_order(db: State<DbState>, id: i64) -> Result<Order, String> {
     let order = read_order(&conn, id)?;
 
     if order.production_status != "draft" {
-        return Err("Подтвердить можно только черновик".to_string());
+        return Err("Начать можно только черновик".to_string());
     }
 
     conn.execute(
-        "UPDATE orders SET production_status = 'confirmed', updated_at = datetime('now')
+        "UPDATE orders SET production_status = 'in_work', updated_at = datetime('now')
          WHERE id = ?1",
         rusqlite::params![id],
     )
@@ -291,11 +295,12 @@ pub fn update_production_status(
 
     // Validate transition
     let valid = match (order.production_status.as_str(), status.as_str()) {
-        ("draft", "confirmed") => true,
-        ("confirmed", "in_work") => true,
+        ("draft", "in_work") => true,
         ("in_work", "ready") => true,
         ("ready", "closed") => true,
-        ("draft" | "confirmed" | "in_work", "cancelled") => true,
+        ("draft" | "in_work", "cancelled") => true,
+        // Legacy: allow confirmed → in_work/ready/cancelled
+        ("confirmed", "in_work" | "ready" | "cancelled") => true,
         _ => false,
     };
 
@@ -311,6 +316,16 @@ pub fn update_production_status(
         rusqlite::params![status, id],
     )
     .map_err(|e| e.to_string())?;
+
+    // When setting order to "ready", mark all non-cancelled items as "done"
+    if status == "ready" {
+        conn.execute(
+            "UPDATE order_items SET production_step = 'done', updated_at = datetime('now')
+             WHERE order_id = ?1 AND is_cancelled = 0 AND production_step != 'done'",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     read_order(&conn, id)
 }
@@ -406,7 +421,7 @@ pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Or
         "SELECT o.id, o.number, o.client_id, c.name, o.pricing_program_id,
                 o.production_status, o.payment_status, o.delivery_status,
                 o.total_amount, o.paid_amount, o.notes, o.due_date,
-                o.created_at, o.updated_at
+                o.folder_path, o.created_at, o.updated_at
          FROM orders o
          LEFT JOIN clients c ON c.id = o.client_id
          {where_clause}
@@ -434,8 +449,9 @@ pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Or
                 debt_amount: (total - paid).max(0.0),
                 notes: row.get(10)?,
                 due_date: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                folder_path: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })
         .map_err(|e| e.to_string())?

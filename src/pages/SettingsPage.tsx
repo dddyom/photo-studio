@@ -26,16 +26,6 @@ export function SettingsPage() {
     }
   };
 
-  const handleSeedDemo = async () => {
-    if (!confirm("Загрузить демо-данные? Это добавит примеры клиентов, заказов и транзакций.")) return;
-    try {
-      const result = await system.seedDemoData();
-      toast.success(result);
-    } catch (err) {
-      toast.error(String(err));
-    }
-  };
-
   const handleCreateBackup = async () => {
     try {
       const info = await system.createBackup();
@@ -133,12 +123,6 @@ export function SettingsPage() {
             </tbody>
           </table>
         )}
-        <button
-          className="inline-flex items-center px-4 py-2 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors"
-          onClick={handleSeedDemo}
-        >
-          Загрузить демо-данные
-        </button>
       </div>
 
       {/* Backup / Restore */}

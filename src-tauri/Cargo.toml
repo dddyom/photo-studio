@@ -25,3 +25,5 @@ rusqlite = { version = "0.36", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 dirs = "6"
+open = "5"
+tauri-plugin-dialog = "2"

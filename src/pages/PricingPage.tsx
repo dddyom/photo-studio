@@ -1,6 +1,5 @@
-import { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useForm } from "react-hook-form";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import {
@@ -8,7 +7,6 @@ import {
   catalogs,
   type PricingProgram,
   type PricingRule,
-  type CreateProgramInput,
   type PricePreviewInput,
   type CalculatedPrice,
 } from "@/infrastructure/tauri-bridge";
@@ -121,6 +119,7 @@ export function PricingPage() {
 
           {showCreateProgram && (
             <CreateProgramForm
+              programs={programs ?? []}
               onCreated={() => {
                 setShowCreateProgram(false);
                 refetchPrograms();
@@ -194,14 +193,21 @@ export function PricingPage() {
 
 // ── Create program form ──────────────────────────────────────────────
 
-function CreateProgramForm({ onCreated }: { onCreated: () => void }) {
-  const { register, handleSubmit, reset } = useForm<CreateProgramInput>();
+function CreateProgramForm({ programs, onCreated }: { programs: PricingProgram[]; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [sourceId, setSourceId] = useState<number | "">("");
 
-  const onSubmit = async (input: CreateProgramInput) => {
+  const onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!name.trim()) return;
     try {
-      await pricing.createProgram(input);
+      await pricing.createProgram({
+        name: name.trim(),
+        source_program_id: sourceId || null,
+      });
       toast.success("Программа создана");
-      reset();
+      setName("");
+      setSourceId("");
       onCreated();
     } catch (err) {
       toast.error(String(err));
@@ -209,18 +215,31 @@ function CreateProgramForm({ onCreated }: { onCreated: () => void }) {
   };
 
   return (
-    <form
-      onSubmit={handleSubmit(onSubmit)}
-      className="px-4 py-3 border-b border-gray-100 flex gap-2"
-    >
+    <form onSubmit={onSubmit} className="px-4 py-3 border-b border-gray-100 space-y-2">
       <input
-        {...register("name", { required: true })}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
         placeholder="Название программы"
-        className="flex-1 px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500"
+        className="w-full px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500"
+        autoFocus
       />
+      {programs.length > 0 && (
+        <select
+          value={sourceId}
+          onChange={(e) => setSourceId(e.target.value ? Number(e.target.value) : "")}
+          className="w-full px-2 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500"
+        >
+          <option value="">Без шаблона (пустая)</option>
+          {programs.map((p) => (
+            <option key={p.id} value={p.id}>
+              Копия «{p.name}» ({p.rules_count} правил)
+            </option>
+          ))}
+        </select>
+      )}
       <button
         type="submit"
-        className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+        className="w-full px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
       >
         Создать
       </button>
@@ -460,17 +479,6 @@ function RulesPanel({
           />
         )}
 
-        {editingRule && (
-          <RuleForm
-            programId={program.id}
-            programName={program.name}
-            category={editingRule.category}
-            allCategories={allCategories}
-            editingRule={editingRule.rule}
-            onSaved={handleRuleSaved}
-            onCancel={() => setEditingRule(null)}
-          />
-        )}
       </div>
 
       {/* Rules grouped by top-level section, then category tables */}
@@ -530,18 +538,39 @@ function RulesPanel({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
-                        {group.rules.map((rule) => (
-                          <RuleTableRow
-                            key={rule.id}
-                            rule={rule}
-                            fields={fields}
-                            category={group.category}
-                            allCategories={allCategories}
-                            onEdit={() => startEdit(rule)}
-                            onToggle={() => handleToggle(rule)}
-                            onDelete={() => handleDelete(rule)}
-                          />
-                        ))}
+                        {group.rules.map((rule) => {
+                          const isEditing = editingRule?.rule.id === rule.id;
+                          return (
+                            <React.Fragment key={rule.id}>
+                              <RuleTableRow
+                                rule={rule}
+                                fields={fields}
+                                category={group.category}
+                                allCategories={allCategories}
+                                onEdit={() => startEdit(rule)}
+                                onToggle={() => handleToggle(rule)}
+                                onDelete={() => handleDelete(rule)}
+                                isEditing={isEditing}
+                              />
+                              {isEditing && (
+                                <tr>
+                                  <td colSpan={fields.length + 2} className="p-0">
+                                    <RuleForm
+                                      key={rule.id}
+                                      programId={program.id}
+                                      programName={program.name}
+                                      category={editingRule.category}
+                                      allCategories={allCategories}
+                                      editingRule={rule}
+                                      onSaved={handleRuleSaved}
+                                      onCancel={() => setEditingRule(null)}
+                                    />
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -565,6 +594,7 @@ function RuleTableRow({
   onEdit,
   onToggle,
   onDelete,
+  isEditing,
 }: {
   rule: PricingRule;
   fields: { key: string; label: string; options?: { value: string; label: string }[] }[];
@@ -573,6 +603,7 @@ function RuleTableRow({
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
+  isEditing?: boolean;
 }) {
   const values = category
     ? extractFormValues(rule, category, allCategories)
@@ -581,7 +612,7 @@ function RuleTableRow({
 
   return (
     <tr
-      className={`group hover:bg-gray-50 ${!rule.is_active ? "opacity-40" : ""}`}
+      className={`group hover:bg-gray-50 ${!rule.is_active ? "opacity-40" : ""} ${isEditing ? "bg-blue-50" : ""}`}
     >
       {fields.map((f) => {
         const val = values[f.key];

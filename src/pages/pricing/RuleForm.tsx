@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import toast from "react-hot-toast";
 import {
   pricing,
@@ -127,6 +127,13 @@ export function RuleForm({
     }
   }, [meta]);
 
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (editingRule && formRef.current) {
+      formRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [editingRule]);
+
   if (!meta) return null;
 
   const setField = (key: string, value: string) => {
@@ -186,6 +193,7 @@ export function RuleForm({
 
   return (
     <form
+      ref={formRef}
       onSubmit={handleSubmit}
       className="px-5 py-4 border-b border-gray-100 bg-gray-50 space-y-4"
     >

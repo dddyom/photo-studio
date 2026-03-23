@@ -8,7 +8,7 @@ import type {
 
 export const PRODUCTION_STATUS_LABELS: Record<ProductionStatus, string> = {
   draft: "Черновик",
-  confirmed: "Подтверждён",
+  confirmed: "В работе",
   in_work: "В работе",
   ready: "Готов",
   closed: "Закрыт",
@@ -51,17 +51,35 @@ export function productionStepColor(s: ProductionStep): string {
   }
 }
 
-export function nextStepLabel(kind: ItemKind, current: ProductionStep): string | null {
-  const chains: Record<ItemKind, ProductionStep[]> = {
-    book: ["pending", "printed", "assembled", "done"],
-    print: ["pending", "printed", "done"],
-    service: ["pending", "done"],
-    extra: ["pending", "done"],
-  };
-  const steps = chains[kind];
+export function stepsForFlags(hasPrinting: boolean, hasAssembly: boolean): ProductionStep[] {
+  if (hasPrinting && hasAssembly) return ["pending", "printed", "assembled", "done"];
+  if (hasPrinting) return ["pending", "printed", "done"];
+  if (hasAssembly) return ["pending", "assembled", "done"];
+  return ["pending", "done"];
+}
+
+export function nextStepLabel(
+  kind: ItemKind,
+  current: ProductionStep,
+  flags?: { has_printing: boolean; has_assembly: boolean },
+): string | null {
+  let steps: ProductionStep[];
+  if (kind === "book") {
+    steps = stepsForFlags(true, true);
+  } else if (kind === "print" && flags) {
+    steps = stepsForFlags(flags.has_printing, flags.has_assembly);
+  } else if (kind === "print") {
+    steps = stepsForFlags(true, false);
+  } else {
+    steps = stepsForFlags(false, false);
+  }
+
   const idx = steps.indexOf(current);
   if (idx < 0 || idx >= steps.length - 1) return null;
-  return PRODUCTION_STEP_LABELS[steps[idx + 1]];
+  // The penultimate step auto-advances to "done", so button shows that step name
+  const nextStep = steps[idx + 1];
+  if (nextStep === "done") return null; // auto-done, no button needed
+  return PRODUCTION_STEP_LABELS[nextStep];
 }
 
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -75,7 +93,6 @@ export function productionStatusColor(s: ProductionStatus): string {
     case "draft":
       return "bg-gray-100 text-gray-700";
     case "confirmed":
-      return "bg-blue-100 text-blue-700";
     case "in_work":
       return "bg-yellow-100 text-yellow-800";
     case "ready":

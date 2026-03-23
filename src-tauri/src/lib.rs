@@ -6,6 +6,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -34,7 +35,6 @@ pub fn run() {
             commands::system::get_db_info,
             commands::system::get_settings,
             commands::system::update_setting,
-            commands::system::seed_demo_data,
             commands::system::create_backup,
             commands::system::list_backups,
             commands::system::restore_backup,
@@ -42,6 +42,7 @@ pub fn run() {
             commands::system::export_orders_csv,
             commands::system::export_transactions_csv,
             commands::system::export_partner_settlements_csv,
+            commands::system::open_folder,
             // Clients
             commands::clients::list_clients,
             commands::clients::get_client,
@@ -90,6 +91,8 @@ pub fn run() {
             commands::catalogs::update_extra_option_type,
             commands::catalogs::delete_extra_option_type,
             commands::catalogs::list_company_accounts,
+            commands::catalogs::popular_print_formats,
+            commands::catalogs::popular_book_formats,
             // Catalogs v10: dynamic pricing options
             commands::catalogs::list_print_categories,
             commands::catalogs::list_all_print_categories,
@@ -111,6 +114,7 @@ pub fn run() {
             commands::catalogs::create_book_cover_option,
             commands::catalogs::update_book_cover_option,
             commands::catalogs::delete_book_cover_option,
+            commands::catalogs::set_cover_option_families,
             commands::catalogs::list_wide_format_materials,
             commands::catalogs::list_all_wide_format_materials,
             commands::catalogs::create_wide_format_material,
@@ -126,6 +130,8 @@ pub fn run() {
             commands::pricing::update_pricing_rule,
             commands::pricing::delete_pricing_rule,
             commands::pricing::preview_price,
+            commands::pricing::list_category_prices,
+            commands::pricing::list_book_prices,
             // Orders
             commands::orders::create_order,
             commands::orders::get_order,
@@ -144,6 +150,7 @@ pub fn run() {
             commands::order_items::cancel_order_item,
             commands::order_items::update_order_item_price,
             commands::order_items::update_order_item,
+            commands::order_items::update_order_item_note,
             // Order payments & deliveries
             commands::order_payments::register_payment,
             commands::order_payments::register_refund,

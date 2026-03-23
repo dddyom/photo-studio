@@ -59,12 +59,6 @@ pub fn update_setting(db: State<DbState>, key: String, value: String) -> Result<
     Ok(())
 }
 
-#[tauri::command]
-pub fn seed_demo_data(db: State<DbState>) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    crate::db::seed::seed_demo(&conn).map_err(|e| e.to_string())
-}
-
 // ── Backup / Restore ────────────────────────────────────────────────
 
 fn backup_dir(db: &DbState) -> std::path::PathBuf {
@@ -368,4 +362,13 @@ pub fn export_partner_settlements_csv(db: State<DbState>) -> Result<String, Stri
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
 
     Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_dir() {
+        return Err(format!("Папка не найдена: {path}"));
+    }
+    open::that(&path).map_err(|e| e.to_string())
 }

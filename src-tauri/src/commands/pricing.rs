@@ -35,6 +35,7 @@ pub struct CalculatedPrice {
 #[derive(Debug, Deserialize)]
 pub struct CreateProgramInput {
     pub name: String,
+    pub source_program_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +65,40 @@ pub struct PricePreviewInput {
     pub item_kind: String,
     pub spec_json: String,
     pub qty: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CategoryPriceEntry {
+    pub value: String,
+    pub unit_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CategoryPricesInput {
+    pub pricing_program_id: i64,
+    pub item_kind: String,
+    pub category: String,
+    pub field_key: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BookPrices {
+    /// Per-format block price (per spread) for the given assembly_kind
+    pub block_per_spread: Vec<CategoryPriceEntry>,
+    /// Per-format cover price for the given cover_family (empty if no cover)
+    pub cover: Vec<CategoryPriceEntry>,
+    /// Per cover option price
+    pub cover_options: Vec<CategoryPriceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BookPricesInput {
+    pub pricing_program_id: i64,
+    pub assembly_kind: String,
+    pub cover_family: String,
+    pub format_names: Vec<String>,
+    pub cover_option_names: Vec<String>,
 }
 
 // ── Program commands ─────────────────────────────────────────────────
@@ -130,6 +165,18 @@ pub fn create_pricing_program(
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
+
+    // Copy rules from source program if specified
+    if let Some(source_id) = input.source_program_id {
+        conn.execute(
+            "INSERT INTO pricing_rules (pricing_program_id, item_kind, match_params, price_formula, is_active)
+             SELECT ?1, item_kind, match_params, price_formula, is_active
+             FROM pricing_rules WHERE pricing_program_id = ?2",
+            rusqlite::params![id, source_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     read_program(&conn, id)
 }
 
@@ -295,11 +342,13 @@ pub fn create_pricing_rule(
         ));
     }
 
-    // Validate JSON
-    let _: serde_json::Value = serde_json::from_str(&input.match_params)
+    // Validate & normalize JSON (parse → re-serialize for canonical format)
+    let mp_val: serde_json::Value = serde_json::from_str(&input.match_params)
         .map_err(|_| "match_params: невалидный JSON".to_string())?;
+    let match_params_normalized = mp_val.to_string();
     let formula: serde_json::Value = serde_json::from_str(&input.price_formula)
         .map_err(|_| "price_formula: невалидный JSON".to_string())?;
+    let price_formula_normalized = formula.to_string();
 
     // Validate formula structure
     validate_formula(&formula)?;
@@ -321,8 +370,8 @@ pub fn create_pricing_rule(
         rusqlite::params![
             input.pricing_program_id,
             input.item_kind,
-            input.match_params,
-            input.price_formula
+            match_params_normalized,
+            price_formula_normalized
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -343,10 +392,10 @@ pub fn update_pricing_rule(
     let mut idx = 1;
 
     if let Some(ref mp) = input.match_params {
-        let _: serde_json::Value =
+        let mp_val: serde_json::Value =
             serde_json::from_str(mp).map_err(|_| "match_params: невалидный JSON".to_string())?;
         sets.push(format!("match_params = ?{idx}"));
-        params.push(Box::new(mp.clone()));
+        params.push(Box::new(mp_val.to_string()));
         idx += 1;
     }
     if let Some(ref pf) = input.price_formula {
@@ -354,7 +403,7 @@ pub fn update_pricing_rule(
             serde_json::from_str(pf).map_err(|_| "price_formula: невалидный JSON".to_string())?;
         validate_formula(&formula)?;
         sets.push(format!("price_formula = ?{idx}"));
-        params.push(Box::new(pf.clone()));
+        params.push(Box::new(formula.to_string()));
         idx += 1;
     }
     if let Some(active) = input.is_active {
@@ -413,6 +462,79 @@ pub fn preview_price(
         .map_err(|_| "spec_json: невалидный JSON".to_string())?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     calculate_price(&conn, input.pricing_program_id, &input.item_kind, &spec, input.qty)
+}
+
+/// Batch price lookup: for a given category, return unit prices for each value.
+#[tauri::command]
+pub fn list_category_prices(
+    db: State<DbState>,
+    input: CategoryPricesInput,
+) -> Result<Vec<CategoryPriceEntry>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut results = Vec::with_capacity(input.values.len());
+    for val in &input.values {
+        let spec = serde_json::json!({
+            "category": input.category,
+            input.field_key.clone(): val,
+        });
+        match calculate_price(&conn, input.pricing_program_id, &input.item_kind, &spec, 1) {
+            Ok(cp) => results.push(CategoryPriceEntry { value: val.clone(), unit_price: cp.unit_price }),
+            Err(_) => {} // no rule for this value — skip
+        }
+    }
+    Ok(results)
+}
+
+/// Batch book price lookup: block per-spread prices for each format,
+/// cover prices for each format (given cover_family), and cover option prices.
+#[tauri::command]
+pub fn list_book_prices(
+    db: State<DbState>,
+    input: BookPricesInput,
+) -> Result<BookPrices, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    // Block per-spread prices by format
+    let mut block_per_spread = Vec::new();
+    for fmt in &input.format_names {
+        let spec = serde_json::json!({
+            "component": "block",
+            "assembly_kind": input.assembly_kind,
+            "format": fmt,
+        });
+        if let Ok(cp) = calculate_price(&conn, input.pricing_program_id, "book", &spec, 1) {
+            block_per_spread.push(CategoryPriceEntry { value: fmt.clone(), unit_price: cp.unit_price });
+        }
+    }
+
+    // Cover prices by format (if cover_family given)
+    let mut cover = Vec::new();
+    if !input.cover_family.is_empty() {
+        for fmt in &input.format_names {
+            let spec = serde_json::json!({
+                "component": "cover",
+                "cover_family": input.cover_family,
+                "format": fmt,
+            });
+            if let Ok(cp) = calculate_price(&conn, input.pricing_program_id, "book", &spec, 1) {
+                cover.push(CategoryPriceEntry { value: fmt.clone(), unit_price: cp.unit_price });
+            }
+        }
+    }
+
+    // Cover option prices
+    let mut cover_options = Vec::new();
+    for opt in &input.cover_option_names {
+        let spec = serde_json::json!({
+            "component": "cover_option",
+            "option_name": opt,
+        });
+        if let Ok(cp) = calculate_price(&conn, input.pricing_program_id, "book", &spec, 1) {
+            cover_options.push(CategoryPriceEntry { value: opt.clone(), unit_price: cp.unit_price });
+        }
+    }
+
+    Ok(BookPrices { block_per_spread, cover, cover_options })
 }
 
 // ── Internal pricing logic ───────────────────────────────────────────
@@ -483,7 +605,18 @@ pub fn calculate_price(
         let specificity = match_obj.map_or(0, |m| m.len());
 
         let matches = match match_obj {
-            Some(params) => params.iter().all(|(k, v)| spec.get(k) == Some(v)),
+            Some(params) => params.iter().all(|(k, v)| {
+                match spec.get(k) {
+                    Some(sv) if sv == v => true,
+                    // Fallback: compare as trimmed strings for type tolerance
+                    Some(sv) => {
+                        let s1 = match sv { serde_json::Value::String(s) => s.clone(), other => other.to_string() };
+                        let s2 = match v { serde_json::Value::String(s) => s.clone(), other => other.to_string() };
+                        s1.trim() == s2.trim()
+                    }
+                    None => false,
+                }
+            }),
             None => true,
         };
 
@@ -495,9 +628,55 @@ pub fn calculate_price(
     }
 
     let (rule_id, formula, _) = best_match
-        .ok_or_else(|| format!("Не найдено правило ценообразования для {item_kind}"))?;
+        .ok_or_else(|| {
+            let kind_label = match item_kind {
+                "book" => "фотокниги",
+                "print" => "печати",
+                "service" => "услуги",
+                "extra" => "доп. опции",
+                other => other,
+            };
+            let detail = describe_spec(spec);
+            if detail.is_empty() {
+                format!("Нет правила ценообразования для {kind_label}")
+            } else {
+                format!("Нет правила ценообразования для {kind_label} ({detail})")
+            }
+        })?;
 
     apply_formula(&formula, spec, qty, rule_id)
+}
+
+/// Build a human-readable description of spec for error messages.
+fn describe_spec(spec: &serde_json::Value) -> String {
+    let obj = match spec.as_object() {
+        Some(o) => o,
+        None => return String::new(),
+    };
+
+    let labels: &[(&str, &str)] = &[
+        ("component", "компонент"),
+        ("assembly_kind", "сборка"),
+        ("cover_family", "обложка"),
+        ("option_name", "опция"),
+        ("format", "формат"),
+        ("category", "категория"),
+        ("material", "материал"),
+        ("wide_format_material", "материал"),
+        ("lamination_type", "ламинация"),
+    ];
+
+    let parts: Vec<String> = labels
+        .iter()
+        .filter_map(|(key, label)| {
+            obj.get(*key)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|val| format!("{label}: {val}"))
+        })
+        .collect();
+
+    parts.join(", ")
 }
 
 fn apply_formula(

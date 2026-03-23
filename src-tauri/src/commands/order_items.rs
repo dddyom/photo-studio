@@ -23,6 +23,7 @@ pub struct OrderItem {
     pub price_breakdown_json: String,
     pub is_cancelled: bool,
     pub production_step: String,
+    pub note: Option<String>,
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
@@ -39,10 +40,10 @@ pub struct AddBookItemInput {
     pub block_material_id: Option<i64>,
     pub cover_type_id: Option<i64>,
     pub cover_material_id: Option<i64>,
-    pub lamination_id: Option<i64>,
     pub qty: i32,
     pub manual_price: Option<f64>,
     pub manual_price_reason: Option<String>,
+    pub note: Option<String>,
     pub extras: Option<Vec<ExtraInput>>,
 }
 
@@ -58,6 +59,7 @@ pub struct AddPrintItemInput {
     pub qty: i32,
     pub manual_price: Option<f64>,
     pub manual_price_reason: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +68,7 @@ pub struct AddServiceItemInput {
     pub description: String,
     pub qty: i32,
     pub unit_price: f64,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +78,7 @@ pub struct AddExtraItemInput {
     pub custom_name: Option<String>,
     pub qty: i32,
     pub unit_price: Option<f64>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,7 +113,7 @@ fn read_order_item(conn: &Connection, id: i64) -> Result<OrderItem, String> {
     conn.query_row(
         "SELECT id, order_id, item_kind, description, qty, unit_price, total_price,
                 price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json,
-                is_cancelled, production_step, sort_order, created_at, updated_at
+                is_cancelled, production_step, note, sort_order, created_at, updated_at
          FROM order_items WHERE id = ?1",
         rusqlite::params![id],
         |row| {
@@ -127,9 +131,10 @@ fn read_order_item(conn: &Connection, id: i64) -> Result<OrderItem, String> {
                 price_breakdown_json: row.get(10)?,
                 is_cancelled: row.get(11)?,
                 production_step: row.get(12)?,
-                sort_order: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
+                note: row.get(13)?,
+                sort_order: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         },
     )
@@ -194,7 +199,7 @@ pub fn list_order_items(db: State<DbState>, order_id: i64) -> Result<Vec<OrderIt
         .prepare(
             "SELECT id, order_id, item_kind, description, qty, unit_price, total_price,
                     price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json,
-                    is_cancelled, production_step, sort_order, created_at, updated_at
+                    is_cancelled, production_step, note, sort_order, created_at, updated_at
              FROM order_items WHERE order_id = ?1 ORDER BY sort_order",
         )
         .map_err(|e| e.to_string())?;
@@ -215,9 +220,10 @@ pub fn list_order_items(db: State<DbState>, order_id: i64) -> Result<Vec<OrderIt
                 price_breakdown_json: row.get(10)?,
                 is_cancelled: row.get(11)?,
                 production_step: row.get(12)?,
-                sort_order: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
+                note: row.get(13)?,
+                sort_order: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -236,8 +242,8 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
     }
 
     let status = get_order_status(&conn, input.order_id)?;
-    if status != "draft" {
-        return Err("Добавление позиций доступно только для черновика".to_string());
+    if status != "draft" && status != "in_work" {
+        return Err("Добавление позиций доступно только для черновика или заказа в работе".to_string());
     }
 
     // Build spec snapshot with human-readable names
@@ -254,11 +260,6 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
         .cover_material_id
         .map(|id| catalog_name(&conn, "cover_materials", id))
         .unwrap_or_default();
-    let lam_name = input
-        .lamination_id
-        .map(|id| catalog_name(&conn, "lamination_types", id))
-        .unwrap_or_default();
-
     let assembly_kind = input.assembly_kind.clone().unwrap_or_default();
     let cover_family = input.cover_family.clone().unwrap_or_default();
     let cover_options = input.cover_options.clone().unwrap_or_default();
@@ -272,7 +273,6 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
         "block_material": block_name,
         "cover_type": cover_type_name,
         "cover_material": cover_mat_name,
-        "lamination": lam_name,
     });
     let spec_json = spec.to_string();
 
@@ -283,6 +283,8 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
         _ => "",
     };
     let cover_label = match cover_family.as_str() {
+        "plain" => "обычная",
+        "laminated" => "лам.",
         "laminated_hard" => "лам. твёрдая",
         "eco_leather" => "экокожа",
         _ => &cover_type_name,
@@ -331,8 +333,8 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
 
     conn.execute(
         "INSERT INTO order_items (order_id, item_kind, description, qty, unit_price, total_price,
-            price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json, sort_order)
-         VALUES (?1, 'book', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json, note, sort_order)
+         VALUES (?1, 'book', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             input.order_id,
             description,
@@ -343,6 +345,7 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
             manual_reason,
             spec_json,
             breakdown_json,
+            input.note,
             sort,
         ],
     )
@@ -353,9 +356,9 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
     // Insert book detail row
     conn.execute(
         "INSERT INTO order_item_books (order_item_id, book_format_id, spread_count,
-            block_material_id, cover_type_id, cover_material_id, lamination_id,
+            block_material_id, cover_type_id, cover_material_id,
             assembly_kind, cover_family)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             item_id,
             input.book_format_id,
@@ -363,7 +366,6 @@ pub fn add_book_item(db: State<DbState>, input: AddBookItemInput) -> Result<Orde
             input.block_material_id,
             input.cover_type_id,
             input.cover_material_id,
-            input.lamination_id,
             input.assembly_kind,
             input.cover_family,
         ],
@@ -412,8 +414,8 @@ pub fn add_print_item(db: State<DbState>, input: AddPrintItemInput) -> Result<Or
     }
 
     let status = get_order_status(&conn, input.order_id)?;
-    if status != "draft" {
-        return Err("Добавление позиций доступно только для черновика".to_string());
+    if status != "draft" && status != "in_work" {
+        return Err("Добавление позиций доступно только для черновика или заказа в работе".to_string());
     }
 
     let category = input.category.clone().unwrap_or_else(|| "lab_print".to_string());
@@ -507,8 +509,8 @@ pub fn add_print_item(db: State<DbState>, input: AddPrintItemInput) -> Result<Or
 
     conn.execute(
         "INSERT INTO order_items (order_id, item_kind, description, qty, unit_price, total_price,
-            price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json, sort_order)
-         VALUES (?1, 'print', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            price_source, manual_price_reason, spec_snapshot_json, price_breakdown_json, note, sort_order)
+         VALUES (?1, 'print', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             input.order_id,
             description,
@@ -519,6 +521,7 @@ pub fn add_print_item(db: State<DbState>, input: AddPrintItemInput) -> Result<Or
             manual_reason,
             spec_json,
             breakdown_json,
+            input.note,
             sort,
         ],
     )
@@ -527,13 +530,14 @@ pub fn add_print_item(db: State<DbState>, input: AddPrintItemInput) -> Result<Or
     let item_id = conn.last_insert_rowid();
 
     conn.execute(
-        "INSERT INTO order_item_prints (order_item_id, print_format_id, print_material_id, finishing_id)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO order_item_prints (order_item_id, print_format_id, print_material_id, finishing_id, category)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             item_id,
             input.print_format_id,
             input.print_material_id,
             input.finishing_id,
+            category,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -557,8 +561,8 @@ pub fn add_service_item(
     }
 
     let status = get_order_status(&conn, input.order_id)?;
-    if status != "draft" {
-        return Err("Добавление позиций доступно только для черновика".to_string());
+    if status != "draft" && status != "in_work" {
+        return Err("Добавление позиций доступно только для черновика или заказа в работе".to_string());
     }
 
     let total = input.unit_price * input.qty as f64;
@@ -576,8 +580,8 @@ pub fn add_service_item(
 
     conn.execute(
         "INSERT INTO order_items (order_id, item_kind, description, qty, unit_price, total_price,
-            price_source, spec_snapshot_json, price_breakdown_json, sort_order)
-         VALUES (?1, 'service', ?2, ?3, ?4, ?5, 'manual', ?6, ?7, ?8)",
+            price_source, spec_snapshot_json, price_breakdown_json, note, sort_order)
+         VALUES (?1, 'service', ?2, ?3, ?4, ?5, 'manual', ?6, ?7, ?8, ?9)",
         rusqlite::params![
             input.order_id,
             input.description,
@@ -586,6 +590,7 @@ pub fn add_service_item(
             total,
             spec.to_string(),
             breakdown.to_string(),
+            input.note,
             sort,
         ],
     )
@@ -605,8 +610,8 @@ pub fn add_extra_item(db: State<DbState>, input: AddExtraItemInput) -> Result<Or
     }
 
     let status = get_order_status(&conn, input.order_id)?;
-    if status != "draft" {
-        return Err("Добавление позиций доступно только для черновика".to_string());
+    if status != "draft" && status != "in_work" {
+        return Err("Добавление позиций доступно только для черновика или заказа в работе".to_string());
     }
 
     // Resolve name and price
@@ -641,8 +646,8 @@ pub fn add_extra_item(db: State<DbState>, input: AddExtraItemInput) -> Result<Or
 
     conn.execute(
         "INSERT INTO order_items (order_id, item_kind, description, qty, unit_price, total_price,
-            price_source, spec_snapshot_json, price_breakdown_json, sort_order)
-         VALUES (?1, 'extra', ?2, ?3, ?4, ?5, 'auto', ?6, ?7, ?8)",
+            price_source, spec_snapshot_json, price_breakdown_json, note, sort_order)
+         VALUES (?1, 'extra', ?2, ?3, ?4, ?5, 'auto', ?6, ?7, ?8, ?9)",
         rusqlite::params![
             input.order_id,
             name,
@@ -651,6 +656,7 @@ pub fn add_extra_item(db: State<DbState>, input: AddExtraItemInput) -> Result<Or
             total,
             spec.to_string(),
             breakdown.to_string(),
+            input.note,
             sort,
         ],
     )
@@ -824,5 +830,20 @@ pub fn update_order_item(
     .map_err(|e| e.to_string())?;
 
     recalculate_order_total(&conn, item.order_id)?;
+    read_order_item(&conn, item_id)
+}
+
+#[tauri::command]
+pub fn update_order_item_note(
+    db: State<DbState>,
+    item_id: i64,
+    note: Option<String>,
+) -> Result<OrderItem, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let clean = note.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    conn.execute(
+        "UPDATE order_items SET note = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![clean, item_id],
+    ).map_err(|e| e.to_string())?;
     read_order_item(&conn, item_id)
 }

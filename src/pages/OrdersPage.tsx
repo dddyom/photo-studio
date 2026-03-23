@@ -8,11 +8,13 @@ import {
   orderPayments,
   production,
   clients,
+  catalogs,
   pricing,
   system,
   type Order,
   type OrderItem,
   type OrderListFilter,
+  type PrintCategoryItem,
 } from "@/infrastructure/tauri-bridge";
 import {
   PRODUCTION_STATUS_LABELS,
@@ -32,7 +34,7 @@ import {
 import { AddItemPanel } from "./orders/components/AddItemPanel";
 import { PaymentModal } from "./orders/components/PaymentModal";
 import { DeliveryModal } from "./orders/components/DeliveryModal";
-import { OrderPrintView } from "./orders/components/OrderPrintView";
+import { OrderPrintView, ItemPrintView } from "./orders/components/OrderPrintView";
 
 // ── Quick filter logic ──────────────────────────────────────────────
 
@@ -303,11 +305,13 @@ function OrderDetail({
   const { data: items, refetch: refetchItems } = useTauriCommand(fetchItems, [orderId]);
   const { data: payments, refetch: refetchPayments } = useTauriCommand(fetchPayments, [orderId]);
   const { data: deliveries, refetch: refetchDeliveries } = useTauriCommand(fetchDeliveries, [orderId]);
+  const { data: printCategories } = useTauriCommand(catalogs.printCategories);
 
   const [itemPanelMode, setItemPanelMode] = useState<"add" | OrderItem | null>(null);
   const [showPayment, setShowPayment] = useState(false);
   const [showDelivery, setShowDelivery] = useState(false);
-  const [showPrint, setShowPrint] = useState<"receipt" | "production" | null>(null);
+  const [showPrint, setShowPrint] = useState<"receipt" | null>(null);
+  const [printItem, setPrintItem] = useState<OrderItem | null>(null);
 
   const refetchAll = () => {
     refetchOrder();
@@ -340,9 +344,6 @@ function OrderDetail({
           {!isCancelled && (
             <button onClick={() => setShowPrint("receipt")} className="px-2.5 py-1 border border-gray-200 bg-white text-xs rounded hover:bg-gray-50">Квитанция</button>
           )}
-          {!isCancelled && !isDraft && (
-            <button onClick={() => setShowPrint("production")} className="px-2.5 py-1 border border-gray-200 bg-white text-xs rounded hover:bg-gray-50">Наряд</button>
-          )}
         </div>
       </div>
 
@@ -365,7 +366,7 @@ function OrderDetail({
           <div className="bg-white border border-gray-200 rounded-md p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-base font-semibold">Позиции</h3>
-              {isDraft && (
+              {(isDraft || order.production_status === "in_work") && (
                 <button onClick={() => setItemPanelMode("add")} className="text-sm text-blue-600 hover:text-blue-700">+ Добавить</button>
               )}
             </div>
@@ -379,6 +380,7 @@ function OrderDetail({
                     item={item}
                     isCancelled={isCancelled}
                     showSteps={!isDraft && !isCancelled}
+                    printCategories={printCategories ?? []}
                     onEdit={() => setItemPanelMode(item)}
                     onCancel={async () => {
                       if (!confirm(`Удалить позицию "${item.description || ITEM_KIND_LABELS[item.item_kind]}"?`)) return;
@@ -394,12 +396,17 @@ function OrderDetail({
                         refetchAll();
                       } catch (err) { toast.error(String(err)); }
                     }}
+                    onRefresh={refetchAll}
+                    onPrint={() => setPrintItem(item)}
                   />
                 ))}
               </div>
             )}
           </div>
 
+          {!isCancelled && (
+            <FolderPathBlock order={order} onSaved={refetchAll} />
+          )}
           {!isCancelled && (
             <NotesBlock order={order} onSaved={refetchAll} />
           )}
@@ -481,6 +488,7 @@ function OrderDetail({
       {itemPanelMode && (
         <AddItemPanel
           orderId={orderId}
+          pricingProgramId={order.pricing_program_id}
           editItem={itemPanelMode === "add" ? undefined : itemPanelMode}
           onClose={() => setItemPanelMode(null)}
           onAdded={refetchAll}
@@ -494,6 +502,58 @@ function OrderDetail({
       )}
       {showPrint && (
         <OrderPrintView order={order} items={items ?? []} payments={payments ?? []} type={showPrint} onClose={() => setShowPrint(null)} />
+      )}
+      {printItem && (
+        <ItemPrintView order={order} item={printItem} onClose={() => setPrintItem(null)} />
+      )}
+    </div>
+  );
+}
+
+// ── Folder path block ────────────────────────────────────────────────
+
+function FolderPathBlock({ order, onSaved }: { order: Order; onSaved: () => void }) {
+  const pickFolder = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, title: "Выберите папку заказа" });
+      if (!selected) return;
+      await orders.update(order.id, { notes: order.notes, due_date: order.due_date, folder_path: selected });
+      onSaved();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const clearFolder = async () => {
+    try {
+      await orders.update(order.id, { notes: order.notes, due_date: order.due_date, folder_path: null });
+      onSaved();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  const openFolder = async () => {
+    try { await system.openFolder(order.folder_path!); }
+    catch (err) { toast.error(String(err)); }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-md p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-base font-semibold">Папка заказа</h3>
+        <div className="flex gap-2">
+          <button onClick={pickFolder} className="text-xs text-gray-500 hover:text-blue-600">
+            {order.folder_path ? "Изменить" : "Выбрать"}
+          </button>
+          {order.folder_path && (
+            <button onClick={clearFolder} className="text-xs text-red-500 hover:text-red-600">Убрать</button>
+          )}
+        </div>
+      </div>
+      {order.folder_path ? (
+        <button onClick={openFolder} className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1 text-left break-all">
+          📂 {order.folder_path}
+        </button>
+      ) : (
+        <p className="text-sm text-gray-400 italic">Не указана</p>
       )}
     </div>
   );
@@ -512,7 +572,7 @@ function NotesBlock({ order, onSaved }: { order: Order; onSaved: () => void }) {
   const save = async () => {
     setSaving(true);
     try {
-      await orders.update(order.id, { notes: text || null, due_date: order.due_date });
+      await orders.update(order.id, { notes: text || null, due_date: order.due_date, folder_path: order.folder_path });
       toast.success("Заметки сохранены");
       setEditing(false);
       onSaved();
@@ -568,12 +628,15 @@ function ActionBar({
 }) {
   const nextStatus = getNextProductionStatus(order.production_status);
 
+  const nextLabel = order.production_status === "draft" ? "Начать" :
+    (PRODUCTION_STATUS_LABELS[nextStatus as keyof typeof PRODUCTION_STATUS_LABELS] ?? nextStatus);
+
   const changeStatus = async (status: string) => {
     try {
       if (status === "cancelled") {
         if (!confirm("Отменить заказ?")) return;
         await orders.cancel(order.id);
-      } else if (status === "confirmed") {
+      } else if (status === "in_work" && order.production_status === "draft") {
         await orders.confirm(order.id);
       } else {
         await orders.updateProductionStatus(order.id, status);
@@ -583,21 +646,23 @@ function ActionBar({
     } catch (err) { toast.error(String(err)); }
   };
 
+  const canAddItems = ["draft", "in_work"].includes(order.production_status);
+
   return (
     <div className="flex flex-wrap gap-2">
-      {order.production_status === "draft" && (
+      {canAddItems && (
         <button onClick={onAddItem} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors">+ Позиция</button>
       )}
       {nextStatus && (
         <button onClick={() => changeStatus(nextStatus)} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors">
-          {PRODUCTION_STATUS_LABELS[nextStatus as keyof typeof PRODUCTION_STATUS_LABELS] ?? nextStatus}
+          {nextLabel}
         </button>
       )}
       <button onClick={onPayment} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Оплата</button>
       {!["draft", "cancelled"].includes(order.production_status) && (
         <button onClick={onDelivery} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Выдать</button>
       )}
-      {["draft", "confirmed", "in_work"].includes(order.production_status) && (
+      {["draft", "in_work"].includes(order.production_status) && (
         <button onClick={() => changeStatus("cancelled")} className="px-3 py-1.5 text-red-600 border border-red-200 bg-white text-sm rounded-md hover:bg-red-50 transition-colors">Отменить</button>
       )}
     </div>
@@ -606,8 +671,8 @@ function ActionBar({
 
 function getNextProductionStatus(current: string): string | null {
   switch (current) {
-    case "draft": return "confirmed";
-    case "confirmed": return "in_work";
+    case "draft": return "in_work";
+    case "confirmed": return "in_work"; // legacy
     case "in_work": return "ready";
     case "ready": return "closed";
     default: return null;
@@ -617,56 +682,105 @@ function getNextProductionStatus(current: string): string | null {
 // ── Item row ────────────────────────────────────────────────────────
 
 function ItemRow({
-  item, isCancelled: orderCancelled, showSteps, onEdit, onCancel, onAdvance,
+  item, isCancelled: orderCancelled, showSteps, printCategories, onEdit, onCancel, onAdvance, onRefresh, onPrint,
 }: {
   item: OrderItem;
   isCancelled: boolean;
   showSteps: boolean;
+  printCategories: PrintCategoryItem[];
   onEdit: () => void;
   onCancel: () => void;
   onAdvance: () => void;
+  onRefresh: () => void;
+  onPrint: () => void;
 }) {
-  const next = nextStepLabel(item.item_kind, item.production_step);
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteText, setNoteText] = useState(item.note ?? "");
+
+  const saveNote = async () => {
+    try {
+      await orderItems.updateNote(item.id, noteText.trim() || null);
+      setEditingNote(false);
+      onRefresh();
+    } catch (err) { toast.error(String(err)); }
+  };
+
+  // Resolve print category flags from spec_snapshot_json
+  const flags = (() => {
+    if (item.item_kind !== "print") return undefined;
+    try {
+      const spec = JSON.parse(item.spec_snapshot_json);
+      const cat = printCategories.find((c) => c.code === spec.category);
+      if (cat) return { has_printing: cat.has_printing, has_assembly: cat.has_assembly };
+    } catch { /* ignore */ }
+    return undefined;
+  })();
+  const next = nextStepLabel(item.item_kind, item.production_step, flags);
 
   return (
-    <div className={`flex items-start justify-between py-2 px-3 rounded border ${
+    <div className={`py-2 px-3 rounded border ${
       item.is_cancelled ? "border-gray-100 bg-gray-50 opacity-60 line-through" : "border-gray-100"
     }`}>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-xs px-1.5 py-0.5 bg-gray-100 rounded text-gray-600">
-            {ITEM_KIND_LABELS[item.item_kind]}
-          </span>
-          {showSteps && !item.is_cancelled && (
-            <span className={`text-xs px-1.5 py-0.5 rounded ${productionStepColor(item.production_step)}`}>
-              {PRODUCTION_STEP_LABELS[item.production_step]}
+      <div className="flex items-start justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-1.5 py-0.5 bg-gray-100 rounded text-gray-600">
+              {ITEM_KIND_LABELS[item.item_kind]}
             </span>
-          )}
-          {item.price_source === "manual" && (
-            <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">Ручная цена</span>
-          )}
+            {showSteps && !item.is_cancelled && (
+              <span className={`text-xs px-1.5 py-0.5 rounded ${productionStepColor(item.production_step)}`}>
+                {PRODUCTION_STEP_LABELS[item.production_step]}
+              </span>
+            )}
+            {item.price_source === "manual" && (
+              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">Ручная цена</span>
+            )}
+          </div>
+          <p className="text-sm mt-1">{item.description || "—"}</p>
         </div>
-        <p className="text-sm mt-1">{item.description || "—"}</p>
+        <div className="text-right ml-4 shrink-0">
+          <div className="text-sm font-mono">
+            {item.qty} x {formatMoney(item.unit_price)} = <span className="font-medium">{formatMoney(item.total_price)} ₸</span>
+          </div>
+          <div className="flex items-center justify-end gap-2 mt-1">
+            {showSteps && !item.is_cancelled && next && (
+              <button onClick={(e) => { e.stopPropagation(); onAdvance(); }}
+                className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700">{next}</button>
+            )}
+            {!item.is_cancelled && (
+              <button onClick={(e) => { e.stopPropagation(); onPrint(); }}
+                className="text-xs px-2 py-0.5 border border-gray-300 rounded text-gray-600 hover:border-blue-400 hover:text-blue-600 transition-colors">Наряд</button>
+            )}
+            {!item.is_cancelled && !orderCancelled && (
+              <>
+                <button onClick={(e) => { e.stopPropagation(); onEdit(); }}
+                  className="text-xs text-gray-500 hover:text-blue-600">Изм.</button>
+                <button onClick={(e) => { e.stopPropagation(); onCancel(); }}
+                  className="text-xs text-red-500 hover:text-red-600">Удл.</button>
+              </>
+            )}
+          </div>
+        </div>
       </div>
-      <div className="text-right ml-4 shrink-0">
-        <div className="text-sm font-mono">
-          {item.qty} x {formatMoney(item.unit_price)} = <span className="font-medium">{formatMoney(item.total_price)} ₸</span>
-        </div>
-        <div className="flex items-center justify-end gap-2 mt-1">
-          {showSteps && !item.is_cancelled && next && (
-            <button onClick={(e) => { e.stopPropagation(); onAdvance(); }}
-              className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700">{next}</button>
-          )}
-          {!item.is_cancelled && !orderCancelled && (
-            <>
-              <button onClick={(e) => { e.stopPropagation(); onEdit(); }}
-                className="text-xs text-gray-500 hover:text-blue-600">Изм.</button>
-              <button onClick={(e) => { e.stopPropagation(); onCancel(); }}
-                className="text-xs text-red-500 hover:text-red-600">Удл.</button>
-            </>
-          )}
-        </div>
-      </div>
+      {/* Inline note */}
+      {!item.is_cancelled && (
+        editingNote ? (
+          <div className="flex gap-1.5 mt-1.5">
+            <input value={noteText} onChange={(e) => setNoteText(e.target.value)}
+              placeholder="Комментарий..."
+              className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:border-blue-500"
+              onKeyDown={(e) => { if (e.key === "Enter") saveNote(); if (e.key === "Escape") { setEditingNote(false); setNoteText(item.note ?? ""); } }}
+              autoFocus />
+            <button onClick={saveNote} className="text-xs text-blue-600 hover:text-blue-700">OK</button>
+            <button onClick={() => { setEditingNote(false); setNoteText(item.note ?? ""); }} className="text-xs text-gray-400">Отм.</button>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400 mt-1 cursor-pointer hover:text-gray-600"
+            onClick={(e) => { e.stopPropagation(); setEditingNote(true); }}>
+            {item.note || "+ комментарий"}
+          </p>
+        )
+      )}
     </div>
   );
 }
