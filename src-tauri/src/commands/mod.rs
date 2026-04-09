@@ -5,5 +5,6 @@ pub mod pricing;
 pub mod orders;
 pub mod order_items;
 pub mod order_payments;
+pub mod client_balance;
 pub mod production;
 pub mod finance;

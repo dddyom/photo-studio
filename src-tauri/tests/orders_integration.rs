@@ -205,6 +205,27 @@ fn setup_db() -> Connection {
     conn.execute_batch("ALTER TABLE clients ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;")
         .unwrap();
 
+    // v19: Client balance
+    conn.execute_batch(
+        "ALTER TABLE clients ADD COLUMN balance REAL NOT NULL DEFAULT 0;
+
+         CREATE TABLE client_balance_transactions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id       INTEGER NOT NULL REFERENCES clients(id),
+            amount          REAL    NOT NULL,
+            direction       TEXT    NOT NULL CHECK (direction IN ('in','out')),
+            transaction_type TEXT   NOT NULL CHECK (transaction_type IN (
+                'deposit','withdraw','order_payment','order_surplus'
+            )),
+            order_id        INTEGER REFERENCES orders(id),
+            payment_method  TEXT,
+            account_id      INTEGER REFERENCES company_accounts(id),
+            notes           TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+         );",
+    )
+    .unwrap();
+
     // Seed test data
     seed_test_data(&conn);
     conn
@@ -1113,5 +1134,167 @@ mod structured_rule_tests {
         assert_eq!(mp2["component"], "block");
         assert_eq!(mp2["assembly_kind"], "plastic");
         assert_eq!(mp2["format"], "20x30");
+    }
+}
+
+// ── Client balance tests ──────────────────────────────────────────────
+
+mod client_balance_tests {
+    use super::*;
+
+    fn create_order_with_total(conn: &Connection, total: f64) -> (i64, i64, i64) {
+        let client_id = get_id(conn, "SELECT id FROM clients LIMIT 1");
+        let account_id = get_id(conn, "SELECT id FROM company_accounts WHERE account_type='cash'");
+        conn.execute(
+            "INSERT INTO orders (number, client_id, production_status, total_amount)
+             VALUES ('2604-001', ?1, 'in_work', ?2)",
+            rusqlite::params![client_id, total],
+        ).unwrap();
+        let order_id = conn.last_insert_rowid();
+        (client_id, order_id, account_id)
+    }
+
+    #[test]
+    fn test_deposit_increases_client_balance() {
+        let conn = setup_db();
+        let client_id = get_id(&conn, "SELECT id FROM clients LIMIT 1");
+
+        assert_eq!(get_f64(&conn, &format!("SELECT balance FROM clients WHERE id = {client_id}")), 0.0);
+
+        // Simulate deposit
+        conn.execute(
+            "UPDATE clients SET balance = balance + 50000 WHERE id = ?1",
+            rusqlite::params![client_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, payment_method, account_id, notes)
+             VALUES (?1, 50000, 'in', 'deposit', 'cash', 1, 'Аванс')",
+            rusqlite::params![client_id],
+        ).unwrap();
+
+        assert_eq!(get_f64(&conn, &format!("SELECT balance FROM clients WHERE id = {client_id}")), 50000.0);
+
+        let tx_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM client_balance_transactions WHERE client_id = ?1 AND transaction_type = 'deposit'",
+            rusqlite::params![client_id], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(tx_count, 1);
+    }
+
+    #[test]
+    fn test_pay_order_from_balance() {
+        let conn = setup_db();
+        let (client_id, order_id, _account_id) = create_order_with_total(&conn, 20000.0);
+
+        // Give client a balance
+        conn.execute("UPDATE clients SET balance = 50000 WHERE id = ?1", rusqlite::params![client_id]).unwrap();
+
+        // Pay order from balance
+        conn.execute("UPDATE clients SET balance = balance - 20000 WHERE id = ?1", rusqlite::params![client_id]).unwrap();
+        conn.execute("UPDATE orders SET paid_amount = paid_amount + 20000 WHERE id = ?1", rusqlite::params![order_id]).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, order_id)
+             VALUES (?1, 20000, 'out', 'order_payment', ?2)",
+            rusqlite::params![client_id, order_id],
+        ).unwrap();
+
+        // Recompute payment status
+        let (total, paid): (f64, f64) = conn.query_row(
+            "SELECT total_amount, paid_amount FROM orders WHERE id = ?1",
+            rusqlite::params![order_id], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        let status = if (paid - total).abs() < 0.01 { "paid" } else { "partial" };
+        conn.execute("UPDATE orders SET payment_status = ?1 WHERE id = ?2", rusqlite::params![status, order_id]).unwrap();
+
+        assert_eq!(get_f64(&conn, &format!("SELECT balance FROM clients WHERE id = {client_id}")), 30000.0);
+        assert_eq!(get_str(&conn, &format!("SELECT payment_status FROM orders WHERE id = {order_id}")), "paid");
+        assert_eq!(get_f64(&conn, &format!("SELECT paid_amount FROM orders WHERE id = {order_id}")), 20000.0);
+    }
+
+    #[test]
+    fn test_overpayment_surplus_to_balance() {
+        let conn = setup_db();
+        let (client_id, order_id, account_id) = create_order_with_total(&conn, 20000.0);
+
+        // Client pays 70000 for 20000 order
+        let payment_amount = 70000.0;
+        let total_amount = 20000.0;
+        let surplus = payment_amount - total_amount;
+
+        // Record finance transaction
+        conn.execute(
+            "INSERT INTO finance_transactions (transaction_type, amount, direction, account_id, order_id, description)
+             VALUES ('order_payment_in', ?1, 'in', ?2, ?3, 'Оплата')",
+            rusqlite::params![payment_amount, account_id, order_id],
+        ).unwrap();
+        conn.execute("UPDATE company_accounts SET balance = balance + ?1 WHERE id = ?2", rusqlite::params![payment_amount, account_id]).unwrap();
+
+        // Only order amount goes to paid_amount
+        conn.execute("UPDATE orders SET paid_amount = ?1, payment_status = 'paid' WHERE id = ?2", rusqlite::params![total_amount, order_id]).unwrap();
+
+        // Surplus goes to client balance
+        conn.execute("UPDATE clients SET balance = balance + ?1 WHERE id = ?2", rusqlite::params![surplus, client_id]).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, order_id, notes)
+             VALUES (?1, ?2, 'in', 'order_surplus', ?3, 'Излишек по оплате заказа')",
+            rusqlite::params![client_id, surplus, order_id],
+        ).unwrap();
+
+        assert_eq!(get_f64(&conn, &format!("SELECT balance FROM clients WHERE id = {client_id}")), 50000.0);
+        assert_eq!(get_f64(&conn, &format!("SELECT paid_amount FROM orders WHERE id = {order_id}")), 20000.0);
+        assert_eq!(get_str(&conn, &format!("SELECT payment_status FROM orders WHERE id = {order_id}")), "paid");
+
+        // Verify balance transaction recorded
+        let surplus_tx: (f64, String) = conn.query_row(
+            "SELECT amount, transaction_type FROM client_balance_transactions
+             WHERE client_id = ?1 AND transaction_type = 'order_surplus'",
+            rusqlite::params![client_id], |row| Ok((row.get(0)?, row.get(1)?))
+        ).unwrap();
+        assert_eq!(surplus_tx.0, 50000.0);
+        assert_eq!(surplus_tx.1, "order_surplus");
+    }
+
+    #[test]
+    fn test_withdraw_from_balance() {
+        let conn = setup_db();
+        let client_id = get_id(&conn, "SELECT id FROM clients LIMIT 1");
+
+        // Give client balance
+        conn.execute("UPDATE clients SET balance = 30000 WHERE id = ?1", rusqlite::params![client_id]).unwrap();
+
+        // Withdraw
+        conn.execute("UPDATE clients SET balance = balance - 10000 WHERE id = ?1", rusqlite::params![client_id]).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, payment_method, account_id)
+             VALUES (?1, 10000, 'out', 'withdraw', 'cash', 1)",
+            rusqlite::params![client_id],
+        ).unwrap();
+
+        assert_eq!(get_f64(&conn, &format!("SELECT balance FROM clients WHERE id = {client_id}")), 20000.0);
+    }
+
+    #[test]
+    fn test_balance_history_ordering() {
+        let conn = setup_db();
+        let client_id = get_id(&conn, "SELECT id FROM clients LIMIT 1");
+
+        // Multiple transactions
+        conn.execute("UPDATE clients SET balance = 50000 WHERE id = ?1", rusqlite::params![client_id]).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, notes)
+             VALUES (?1, 50000, 'in', 'deposit', 'first')",
+            rusqlite::params![client_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions (client_id, amount, direction, transaction_type, notes)
+             VALUES (?1, 20000, 'out', 'order_payment', 'second')",
+            rusqlite::params![client_id],
+        ).unwrap();
+
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM client_balance_transactions WHERE client_id = ?1",
+            rusqlite::params![client_id], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(count, 2);
     }
 }

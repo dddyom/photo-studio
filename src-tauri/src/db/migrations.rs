@@ -581,6 +581,29 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     (18, "add note column to order_items", "
         ALTER TABLE order_items ADD COLUMN note TEXT;
     "),
+
+    // ── v19: Client balance ─────────────────────────────────────────────
+    (19, "client balance and balance transactions", "
+        ALTER TABLE clients ADD COLUMN balance REAL NOT NULL DEFAULT 0;
+
+        CREATE TABLE client_balance_transactions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id       INTEGER NOT NULL REFERENCES clients(id),
+            amount          REAL    NOT NULL,
+            direction       TEXT    NOT NULL CHECK (direction IN ('in','out')),
+            transaction_type TEXT   NOT NULL CHECK (transaction_type IN (
+                'deposit','withdraw','order_payment','order_surplus'
+            )),
+            order_id        INTEGER REFERENCES orders(id),
+            payment_method  TEXT,
+            account_id      INTEGER REFERENCES company_accounts(id),
+            notes           TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_client_balance_tx_client ON client_balance_transactions(client_id);
+        CREATE INDEX idx_client_balance_tx_order  ON client_balance_transactions(order_id);
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

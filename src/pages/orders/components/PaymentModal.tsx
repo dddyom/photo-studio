@@ -3,7 +3,9 @@ import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import {
   catalogs,
+  clients as clientsApi,
   orderPayments,
+  clientBalance,
   type Order,
 } from "@/infrastructure/tauri-bridge";
 import { formatMoney, PAYMENT_METHOD_LABELS } from "@/shared/orderLabels";
@@ -13,6 +15,8 @@ const INPUT =
 
 const PAYMENT_METHODS = ["cash", "card", "bank_transfer"] as const;
 
+type PaySource = "external" | "balance";
+
 interface Props {
   order: Order;
   onClose: () => void;
@@ -21,13 +25,20 @@ interface Props {
 
 export function PaymentModal({ order, onClose, onDone }: Props) {
   const { data: accounts } = useTauriCommand(catalogs.companyAccounts);
+  const { data: client } = useTauriCommand(
+    () => clientsApi.get(order.client_id),
+    [order.client_id]
+  );
   const [amount, setAmount] = useState(
     order.debt_amount > 0 ? String(order.debt_amount) : ""
   );
   const [method, setMethod] = useState<string>("cash");
   const [accountId, setAccountId] = useState<number | "">("");
   const [notes, setNotes] = useState("");
+  const [paySource, setPaySource] = useState<PaySource>("external");
   const [submitting, setSubmitting] = useState(false);
+
+  const clientBalanceAmount = client?.balance ?? 0;
 
   // Auto-select first account matching method
   const matchingAccount = (accounts ?? []).find((a) => {
@@ -45,20 +56,37 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
       toast.error("Укажите сумму");
       return;
     }
-    if (!effectiveAccountId) {
-      toast.error("Выберите счёт");
-      return;
-    }
     setSubmitting(true);
     try {
-      await orderPayments.register({
-        order_id: order.id,
-        amount: amt,
-        payment_method: method,
-        account_id: effectiveAccountId,
-        notes: notes || null,
-      });
-      toast.success(`Оплата ${formatMoney(amt)} ₸ зарегистрирована`);
+      if (paySource === "balance") {
+        await clientBalance.payOrder({
+          order_id: order.id,
+          amount: amt,
+          notes: notes || null,
+        });
+        toast.success(`Списано с баланса: ${formatMoney(amt)} ₸`);
+      } else {
+        if (!effectiveAccountId) {
+          toast.error("Выберите счёт");
+          setSubmitting(false);
+          return;
+        }
+        const result = await orderPayments.register({
+          order_id: order.id,
+          amount: amt,
+          payment_method: method,
+          account_id: effectiveAccountId,
+          notes: notes || null,
+        });
+        if (result.surplus_to_balance > 0.01) {
+          toast.success(
+            `Оплата ${formatMoney(amt)} ₸. На баланс клиента: ${formatMoney(result.surplus_to_balance)} ₸`,
+            { duration: 5000 }
+          );
+        } else {
+          toast.success(`Оплата ${formatMoney(amt)} ₸ зарегистрирована`);
+        }
+      }
       onDone();
       onClose();
     } catch (err) {
@@ -86,43 +114,81 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
             )}
           </div>
 
+          {/* Pay source selector */}
+          {clientBalanceAmount > 0.01 && (
+            <div>
+              <label className="block text-sm font-medium mb-1">Источник</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPaySource("external")}
+                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                    paySource === "external"
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  Внешняя оплата
+                </button>
+                <button
+                  onClick={() => {
+                    setPaySource("balance");
+                    // Pre-fill with min(balance, debt)
+                    const maxFromBalance = Math.min(clientBalanceAmount, order.debt_amount > 0 ? order.debt_amount : clientBalanceAmount);
+                    setAmount(String(maxFromBalance));
+                  }}
+                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                    paySource === "balance"
+                      ? "bg-green-600 text-white"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  С баланса ({formatMoney(clientBalanceAmount)} ₸)
+                </button>
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium mb-1">Сумма *</label>
             <input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className={INPUT} />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-1">Способ оплаты</label>
-            <div className="flex gap-2">
-              {PAYMENT_METHODS.map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMethod(m)}
-                  className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                    method === m
-                      ? "bg-blue-600 text-white"
-                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                  }`}
-                >
-                  {PAYMENT_METHOD_LABELS[m]}
-                </button>
-              ))}
-            </div>
-          </div>
+          {paySource === "external" && (
+            <>
+              <div>
+                <label className="block text-sm font-medium mb-1">Способ оплаты</label>
+                <div className="flex gap-2">
+                  {PAYMENT_METHODS.map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMethod(m)}
+                      className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                        method === m
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                      }`}
+                    >
+                      {PAYMENT_METHOD_LABELS[m]}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-1">Счёт</label>
-            <select
-              value={accountId || effectiveAccountId || ""}
-              onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : "")}
-              className={INPUT}
-            >
-              <option value="">— Выберите —</option>
-              {(accounts ?? []).map((a) => (
-                <option key={a.id} value={a.id}>{a.name}</option>
-              ))}
-            </select>
-          </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">Счёт</label>
+                <select
+                  value={accountId || effectiveAccountId || ""}
+                  onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : "")}
+                  className={INPUT}
+                >
+                  <option value="">— Выберите —</option>
+                  {(accounts ?? []).map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-sm font-medium mb-1">Комментарий</label>
@@ -131,7 +197,7 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
 
           <div className="flex gap-2 pt-2">
             <button onClick={submit} disabled={submitting} className="px-4 py-2 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors disabled:opacity-50">
-              {submitting ? "..." : "Принять оплату"}
+              {submitting ? "..." : paySource === "balance" ? "Списать с баланса" : "Принять оплату"}
             </button>
             <button onClick={onClose} className="px-4 py-2 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">
               Отмена

@@ -781,7 +781,7 @@ pub fn calculate_book_price(
     let block_per_spread = block_calc.unit_price;
     let block_total = block_per_spread * spread_count;
 
-    // 2. Cover price
+    // 2. Cover price (optional — no rule means cover is included in base price)
     let mut cover_price = 0.0;
     let mut cover_breakdown = serde_json::json!(null);
     if !cover_family.is_empty() {
@@ -790,13 +790,25 @@ pub fn calculate_book_price(
             "cover_family": cover_family,
             "format": format,
         });
-        let cover_calc = calculate_price(conn, pricing_program_id, "book", &cover_spec, 1)?;
-        cover_price = cover_calc.unit_price;
-        cover_breakdown = serde_json::json!({
-            "cover_family": cover_family,
-            "format": format,
-            "price": cover_price,
-        });
+        match calculate_price(conn, pricing_program_id, "book", &cover_spec, 1) {
+            Ok(cover_calc) => {
+                cover_price = cover_calc.unit_price;
+                cover_breakdown = serde_json::json!({
+                    "cover_family": cover_family,
+                    "format": format,
+                    "price": cover_price,
+                });
+            }
+            Err(_) => {
+                // Cover rule not found — price included in base, treat as 0
+                cover_breakdown = serde_json::json!({
+                    "cover_family": cover_family,
+                    "format": format,
+                    "price": 0.0,
+                    "note": "no_rule",
+                });
+            }
+        }
     }
 
     // 3. Cover options

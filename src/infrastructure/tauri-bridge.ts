@@ -22,6 +22,7 @@ export interface Client {
   default_pricing_program_id: number | null;
   notes: string | null;
   is_archived: boolean;
+  balance: number;
   created_at: string;
   updated_at: string;
 }
@@ -442,6 +443,11 @@ export interface RegisterPaymentInput {
   notes?: string | null;
 }
 
+export interface RegisterPaymentResult {
+  payment: OrderPayment;
+  surplus_to_balance: number;
+}
+
 export interface OrderRefund {
   id: number;
   order_id: number;
@@ -474,6 +480,44 @@ export interface OrderDelivery {
 export interface RegisterDeliveryInput {
   order_id: number;
   delivered_by?: string | null;
+  notes?: string | null;
+}
+
+// ── Client balance types ────────────────────────────────────────────
+
+export interface ClientBalanceTransaction {
+  id: number;
+  client_id: number;
+  amount: number;
+  direction: "in" | "out";
+  transaction_type: "deposit" | "withdraw" | "order_payment" | "order_surplus";
+  order_id: number | null;
+  order_number: string | null;
+  payment_method: string | null;
+  account_id: number | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface DepositInput {
+  client_id: number;
+  amount: number;
+  payment_method: string;
+  account_id: number;
+  notes?: string | null;
+}
+
+export interface WithdrawInput {
+  client_id: number;
+  amount: number;
+  payment_method: string;
+  account_id: number;
+  notes?: string | null;
+}
+
+export interface PayFromBalanceInput {
+  order_id: number;
+  amount: number;
   notes?: string | null;
 }
 
@@ -773,7 +817,7 @@ export const orderPayments = {
   list: (orderId: number) =>
     invoke<OrderPayment[]>("list_order_payments", { orderId }),
   register: (input: RegisterPaymentInput) =>
-    invoke<OrderPayment>("register_payment", { input }),
+    invoke<RegisterPaymentResult>("register_payment", { input }),
   listRefunds: (orderId: number) =>
     invoke<OrderRefund[]>("list_order_refunds", { orderId }),
   registerRefund: (input: RegisterRefundInput) =>
@@ -782,6 +826,21 @@ export const orderPayments = {
     invoke<OrderDelivery[]>("list_order_deliveries", { orderId }),
   registerDelivery: (input: RegisterDeliveryInput) =>
     invoke<OrderDelivery>("register_delivery", { input }),
+};
+
+// ── Client balance commands ─────────────────────────────────────────
+
+export const clientBalance = {
+  getBalance: (clientId: number) =>
+    invoke<number>("get_client_balance_amount", { clientId }),
+  deposit: (input: DepositInput) =>
+    invoke<ClientBalanceTransaction>("deposit_to_client_balance", { input }),
+  withdraw: (input: WithdrawInput) =>
+    invoke<ClientBalanceTransaction>("withdraw_from_client_balance", { input }),
+  payOrder: (input: PayFromBalanceInput) =>
+    invoke<ClientBalanceTransaction>("pay_order_from_balance", { input }),
+  history: (clientId: number) =>
+    invoke<ClientBalanceTransaction[]>("list_client_balance_history", { clientId }),
 };
 
 // ── Finance commands ────────────────────────────────────────────────

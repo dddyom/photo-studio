@@ -67,13 +67,19 @@ pub struct RegisterDeliveryInput {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterPaymentResult {
+    pub payment: OrderPayment,
+    pub surplus_to_balance: f64,
+}
+
 // ── Commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn register_payment(
     db: State<DbState>,
     input: RegisterPaymentInput,
-) -> Result<OrderPayment, String> {
+) -> Result<RegisterPaymentResult, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     if input.amount <= 0.0 {
@@ -151,19 +157,51 @@ pub fn register_payment(
 
     let payment_id = conn.last_insert_rowid();
 
-    // 4. Update order paid_amount
-    conn.execute(
-        "UPDATE orders SET paid_amount = paid_amount + ?1, updated_at = datetime('now')
-         WHERE id = ?2",
-        rusqlite::params![input.amount, input.order_id],
-    )
-    .map_err(|e| e.to_string())?;
+    // 4. Get order totals to check for surplus
+    let (total_amount, paid_before, client_id): (f64, f64, i64) = conn
+        .query_row(
+            "SELECT total_amount, paid_amount, client_id FROM orders WHERE id = ?1",
+            rusqlite::params![input.order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let paid_after = paid_before + input.amount;
+    let surplus = if paid_after > total_amount && total_amount > 0.0 {
+        // Only the part that exceeds the total is surplus
+        let overpay = paid_after - total_amount;
+        // But if there was already an overpayment, only count the new excess
+        let prev_overpay = (paid_before - total_amount).max(0.0);
+        overpay - prev_overpay
+    } else {
+        0.0
+    };
+
+    // Amount that goes to the order (not to client balance)
+    let order_amount = input.amount - surplus;
+
+    // 4a. Update order paid_amount (only the order-relevant portion)
+    if order_amount > 0.0 {
+        conn.execute(
+            "UPDATE orders SET paid_amount = paid_amount + ?1, updated_at = datetime('now')
+             WHERE id = ?2",
+            rusqlite::params![order_amount, input.order_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // 4b. If there's surplus, deposit it to client balance
+    if surplus > 0.01 {
+        crate::commands::client_balance::record_order_surplus(
+            &conn, client_id, input.order_id, surplus,
+        )?;
+    }
 
     // 5. Recompute payment status
     recompute_payment_status(&conn, input.order_id)?;
 
-    // Return payment record
-    conn.query_row(
+    // Return payment record + surplus info
+    let payment = conn.query_row(
         "SELECT id, order_id, amount, payment_method, account_id,
                 finance_transaction_id, notes, paid_at, created_at
          FROM order_payments WHERE id = ?1",
@@ -182,7 +220,12 @@ pub fn register_payment(
             })
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    Ok(RegisterPaymentResult {
+        payment,
+        surplus_to_balance: surplus,
+    })
 }
 
 #[tauri::command]

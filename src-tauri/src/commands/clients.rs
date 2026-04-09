@@ -12,6 +12,7 @@ pub struct Client {
     pub default_pricing_program_id: Option<i64>,
     pub notes: Option<String>,
     pub is_archived: bool,
+    pub balance: f64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -35,7 +36,7 @@ pub struct UpdateClientInput {
 }
 
 const CLIENT_SELECT: &str =
-    "SELECT id, name, phone, email, default_pricing_program_id, notes, is_archived, created_at, updated_at FROM clients";
+    "SELECT id, name, phone, email, default_pricing_program_id, notes, is_archived, balance, created_at, updated_at FROM clients";
 
 fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<Client> {
     Ok(Client {
@@ -46,8 +47,9 @@ fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<Client> {
         default_pricing_program_id: row.get(4)?,
         notes: row.get(5)?,
         is_archived: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        balance: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
