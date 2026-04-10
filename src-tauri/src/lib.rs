@@ -164,6 +164,7 @@ pub fn run() {
             commands::client_balance::pay_order_from_balance,
             commands::client_balance::get_client_balance_amount,
             commands::client_balance::list_client_balance_history,
+            commands::client_balance::list_clients_with_balance,
             // Production
             commands::production::advance_production_step,
             commands::production::list_production_queue,

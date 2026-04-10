@@ -613,7 +613,17 @@ export interface FinanceSummary {
   account_balances: AccountBalance[];
   total_balance: number;
   supplier_debt_outstanding: number;
+  client_balance_total: number;
+  clients_with_balance_count: number;
   partner_summaries: PartnerSummary[];
+}
+
+export interface ClientWithBalance {
+  client_id: number;
+  client_name: string;
+  phone: string | null;
+  balance: number;
+  last_transaction_at: string | null;
 }
 
 export interface ListTransactionsFilter {
@@ -841,6 +851,8 @@ export const clientBalance = {
     invoke<ClientBalanceTransaction>("pay_order_from_balance", { input }),
   history: (clientId: number) =>
     invoke<ClientBalanceTransaction[]>("list_client_balance_history", { clientId }),
+  listClientsWithBalance: () =>
+    invoke<ClientWithBalance[]>("list_clients_with_balance"),
 };
 
 // ── Finance commands ────────────────────────────────────────────────

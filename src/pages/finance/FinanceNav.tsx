@@ -4,6 +4,7 @@ const TABS = [
   { to: "/finance", label: "Обзор", end: true },
   { to: "/finance/transactions", label: "Журнал операций" },
   { to: "/finance/debts", label: "Долги поставщикам" },
+  { to: "/finance/client-balances", label: "Авансы клиентов" },
   { to: "/finance/partners", label: "Расчёты с партнёрами" },
   { to: "/finance/closing", label: "Закрытие периода" },
 ];

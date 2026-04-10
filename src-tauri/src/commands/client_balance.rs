@@ -6,6 +6,15 @@ use crate::db::DbState;
 // ── DTOs ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ClientWithBalance {
+    pub client_id: i64,
+    pub client_name: String,
+    pub phone: Option<String>,
+    pub balance: f64,
+    pub last_transaction_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClientBalanceTransaction {
     pub id: i64,
     pub client_id: i64,
@@ -394,6 +403,40 @@ pub fn get_client_balance_amount(
 ) -> Result<f64, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     get_client_balance(&conn, client_id)
+}
+
+#[tauri::command]
+pub fn list_clients_with_balance(
+    db: State<DbState>,
+) -> Result<Vec<ClientWithBalance>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.name, c.phone, c.balance,
+                    (SELECT MAX(created_at) FROM client_balance_transactions
+                     WHERE client_id = c.id)
+             FROM clients c
+             WHERE c.balance > 0.01
+             ORDER BY c.balance DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ClientWithBalance {
+                client_id: row.get(0)?,
+                client_name: row.get(1)?,
+                phone: row.get(2)?,
+                balance: row.get(3)?,
+                last_transaction_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows)
 }
 
 #[tauri::command]

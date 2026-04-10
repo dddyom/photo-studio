@@ -237,6 +237,8 @@ pub struct FinanceSummary {
     pub account_balances: Vec<AccountBalance>,
     pub total_balance: f64,
     pub supplier_debt_outstanding: f64,
+    pub client_balance_total: f64,
+    pub clients_with_balance_count: i64,
     pub partner_summaries: Vec<PartnerSummary>,
 }
 
@@ -1626,6 +1628,23 @@ pub(crate) fn get_finance_summary_impl(conn: &Connection) -> Result<FinanceSumma
         )
         .map_err(|e| e.to_string())?;
 
+    // Client balance obligations (money clients prepaid, company owes service)
+    let client_balance_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(balance), 0) FROM clients WHERE balance > 0.01",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let clients_with_balance_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clients WHERE balance > 0.01",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
     // Partner summaries
     let partner_summaries = compute_partner_summaries(conn)?;
 
@@ -1633,6 +1652,8 @@ pub(crate) fn get_finance_summary_impl(conn: &Connection) -> Result<FinanceSumma
         account_balances,
         total_balance,
         supplier_debt_outstanding,
+        client_balance_total,
+        clients_with_balance_count,
         partner_summaries,
     })
 }

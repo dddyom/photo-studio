@@ -86,7 +86,7 @@ export function FinanceDashboard() {
           {/* Key figures */}
           <section>
             <h2 className="text-lg font-medium mb-3">Ключевые показатели</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <div
                 className="bg-white border border-gray-200 rounded-md p-4 cursor-pointer hover:border-gray-300 transition-colors"
                 onClick={() => navigate("/finance/debts")}
@@ -96,6 +96,20 @@ export function FinanceDashboard() {
                   {formatMoney(summary.supplier_debt_outstanding)} ₸
                 </div>
                 <div className="text-xs text-gray-400 mt-1">Сумма открытых обязательств</div>
+              </div>
+              <div
+                className="bg-white border border-gray-200 rounded-md p-4 cursor-pointer hover:border-gray-300 transition-colors"
+                onClick={() => navigate("/finance/client-balances")}
+              >
+                <div className="text-sm text-gray-500">Авансы клиентов</div>
+                <div className={`text-2xl font-bold mt-1 font-mono ${summary.client_balance_total > 0 ? "text-purple-600" : "text-gray-400"}`}>
+                  {formatMoney(summary.client_balance_total)} ₸
+                </div>
+                <div className="text-xs text-gray-400 mt-1">
+                  {summary.clients_with_balance_count > 0
+                    ? `Обязательства перед ${summary.clients_with_balance_count} клиент(ами)`
+                    : "Нет предоплат"}
+                </div>
               </div>
               <div
                 className="bg-white border border-gray-200 rounded-md p-4 cursor-pointer hover:border-gray-300 transition-colors"
