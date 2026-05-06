@@ -49,6 +49,24 @@ pub struct FinanceTransaction {
     pub description: Option<String>,
     pub transaction_date: String,
     pub created_at: String,
+    pub voided_at: Option<String>,
+    pub voided_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VoidTransactionInput {
+    pub transaction_id: i64,
+    pub reason: String,
+    /// When true, allow void in a closed period. The closing_period record
+    /// is then reset to 'open' and its profit_accrual entries deleted, so the
+    /// stale prior calculation doesn't linger.
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreTransactionInput {
+    pub transaction_id: i64,
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,7 +438,8 @@ fn fetch_transaction(conn: &Connection, id: i64) -> Result<FinanceTransaction, S
                 ft.order_id, o.number,
                 ft.liability_id, ft.partner_id, p.name,
                 ft.finance_category_id, fc.name,
-                ft.description, ft.transaction_date, ft.created_at
+                ft.description, ft.transaction_date, ft.created_at,
+                ft.voided_at, ft.voided_reason
          FROM finance_transactions ft
          LEFT JOIN company_accounts ca ON ca.id = ft.account_id
          LEFT JOIN orders o ON o.id = ft.order_id
@@ -448,6 +467,8 @@ fn fetch_transaction(conn: &Connection, id: i64) -> Result<FinanceTransaction, S
                 description: row.get(15)?,
                 transaction_date: row.get(16)?,
                 created_at: row.get(17)?,
+                voided_at: row.get(18)?,
+                voided_reason: row.get(19)?,
             })
         },
     )
@@ -722,7 +743,8 @@ pub(crate) fn list_transactions_impl(
                 ft.order_id, o.number,
                 ft.liability_id, ft.partner_id, p.name,
                 ft.finance_category_id, fc.name,
-                ft.description, ft.transaction_date, ft.created_at
+                ft.description, ft.transaction_date, ft.created_at,
+                ft.voided_at, ft.voided_reason
          FROM finance_transactions ft
          LEFT JOIN company_accounts ca ON ca.id = ft.account_id
          LEFT JOIN orders o ON o.id = ft.order_id
@@ -756,6 +778,8 @@ pub(crate) fn list_transactions_impl(
                 description: row.get(15)?,
                 transaction_date: row.get(16)?,
                 created_at: row.get(17)?,
+                voided_at: row.get(18)?,
+                voided_reason: row.get(19)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1370,6 +1394,25 @@ pub(crate) fn register_partner_profit_payout_impl(
     fetch_settlement_entry(conn, pse_id)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PartnerSummariesFilter {
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+}
+
+#[tauri::command]
+pub fn list_partner_summaries(
+    db: State<DbState>,
+    filter: PartnerSummariesFilter,
+) -> Result<Vec<PartnerSummary>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    compute_partner_summaries_period(
+        &conn,
+        filter.date_from.as_deref().filter(|s| !s.is_empty()),
+        filter.date_to.as_deref().filter(|s| !s.is_empty()),
+    )
+}
+
 #[tauri::command]
 pub fn list_partner_settlements(
     db: State<DbState>,
@@ -1383,7 +1426,7 @@ pub fn list_partner_settlements(
                     pse.finance_transaction_id, pse.description, pse.period, pse.created_at
              FROM partner_settlement_entries pse
              JOIN partners p ON p.id = pse.partner_id
-             WHERE pse.partner_id = ?1
+             WHERE pse.partner_id = ?1 AND pse.voided_at IS NULL
              ORDER BY pse.created_at DESC"
                 .to_string(),
             vec![Box::new(pid)],
@@ -1393,6 +1436,7 @@ pub fn list_partner_settlements(
                     pse.finance_transaction_id, pse.description, pse.period, pse.created_at
              FROM partner_settlement_entries pse
              JOIN partners p ON p.id = pse.partner_id
+             WHERE pse.voided_at IS NULL
              ORDER BY pse.created_at DESC"
                 .to_string(),
             vec![],
@@ -1482,7 +1526,8 @@ pub(crate) fn close_period_impl(
         .query_row(
             "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
              WHERE transaction_type IN ('order_payment_in', 'other_income_in')
-             AND transaction_date >= ?1 AND transaction_date < ?2",
+             AND transaction_date >= ?1 AND transaction_date < ?2
+             AND voided_at IS NULL",
             rusqlite::params![period_start, period_end],
             |row| row.get(0),
         )
@@ -1492,7 +1537,8 @@ pub(crate) fn close_period_impl(
         .query_row(
             "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
              WHERE transaction_type IN ('company_expense_out', 'supplier_debt_paid', 'order_refund_out')
-             AND transaction_date >= ?1 AND transaction_date < ?2",
+             AND transaction_date >= ?1 AND transaction_date < ?2
+             AND voided_at IS NULL",
             rusqlite::params![period_start, period_end],
             |row| row.get(0),
         )
@@ -1659,6 +1705,49 @@ pub(crate) fn get_finance_summary_impl(conn: &Connection) -> Result<FinanceSumma
 }
 
 pub(crate) fn compute_partner_summaries(conn: &Connection) -> Result<Vec<PartnerSummary>, String> {
+    compute_partner_summaries_period(conn, None, None)
+}
+
+// Sums settlement entries with optional period filter (created_at).
+fn sum_settlement(
+    conn: &Connection,
+    partner_id: i64,
+    entry_type: &str,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> Result<f64, String> {
+    let mut sql = String::from(
+        "SELECT COALESCE(SUM(amount), 0) FROM partner_settlement_entries
+         WHERE partner_id = ?1 AND entry_type = ?2 AND voided_at IS NULL",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(partner_id), Box::new(entry_type.to_string())];
+    let mut idx = 3;
+    if let Some(df) = date_from {
+        sql.push_str(&format!(" AND created_at >= ?{idx}"));
+        params.push(Box::new(df.to_string()));
+        idx += 1;
+    }
+    if let Some(dt) = date_to {
+        // Inclusive: append " 23:59:59" if caller passed a YYYY-MM-DD only.
+        let bound = if dt.len() == 10 {
+            format!("{dt} 23:59:59")
+        } else {
+            dt.to_string()
+        };
+        sql.push_str(&format!(" AND created_at <= ?{idx}"));
+        params.push(Box::new(bound));
+    }
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn compute_partner_summaries_period(
+    conn: &Connection,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> Result<Vec<PartnerSummary>, String> {
     let mut stmt = conn
         .prepare("SELECT id, name FROM partners ORDER BY id")
         .map_err(|e| e.to_string())?;
@@ -1672,26 +1761,20 @@ pub(crate) fn compute_partner_summaries(conn: &Connection) -> Result<Vec<Partner
     let mut summaries = Vec::new();
 
     for (pid, pname) in partners {
-        let sum_by_type = |entry_type: &str| -> Result<f64, String> {
-            conn.query_row(
-                "SELECT COALESCE(SUM(amount), 0) FROM partner_settlement_entries
-                 WHERE partner_id = ?1 AND entry_type = ?2",
-                rusqlite::params![pid, entry_type],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())
-        };
+        // Activity numbers respect the period filter
+        let contributions = sum_settlement(conn, pid, "contribution", date_from, date_to)?;
+        let reimbursements = sum_settlement(conn, pid, "reimbursement", date_from, date_to)?;
+        let profit_accrued = sum_settlement(conn, pid, "profit_accrual", date_from, date_to)?;
+        let profit_paid = sum_settlement(conn, pid, "profit_payout", date_from, date_to)?;
+        let draws = sum_settlement(conn, pid, "draw", date_from, date_to)?;
+        let adjustments = sum_settlement(conn, pid, "adjustment", date_from, date_to)?;
 
-        let contributions = sum_by_type("contribution")?;
-        let reimbursements = sum_by_type("reimbursement")?;
-        let profit_accrued = sum_by_type("profit_accrual")?;
-        let profit_paid = sum_by_type("profit_payout")?;
-        let draws = sum_by_type("draw")?;
-        let adjustments = sum_by_type("adjustment")?;
-
-        // balance = contributions + profit_accruals − profit_payouts − draws − reimbursements ± adjustments
-        let balance =
-            contributions + profit_accrued - profit_paid - draws - reimbursements + adjustments;
+        // Balance is always lifetime — it's the current "what company owes",
+        // a snapshot, independent of any reporting period.
+        let lc = sum_settlement(conn, pid, "contribution", None, None)?;
+        let lr = sum_settlement(conn, pid, "reimbursement", None, None)?;
+        let la = sum_settlement(conn, pid, "adjustment", None, None)?;
+        let balance = lc - lr + la;
 
         summaries.push(PartnerSummary {
             partner_id: pid,
@@ -1738,4 +1821,500 @@ fn next_month_start(period: &str) -> Result<String, String> {
     };
 
     Ok(format!("{:04}-{:02}-01", ny, nm))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Void / Restore Transaction
+// ═══════════════════════════════════════════════════════════════════════
+
+// Reads only the columns needed for cascade dispatch.
+struct RawFt {
+    id: i64,
+    transaction_type: String,
+    amount: f64,
+    direction: String,
+    account_id: Option<i64>,
+    linked_transaction_id: Option<i64>,
+    order_id: Option<i64>,
+    liability_id: Option<i64>,
+    transaction_date: String,
+    voided_at: Option<String>,
+}
+
+fn fetch_raw_ft(conn: &Connection, id: i64) -> Result<RawFt, String> {
+    conn.query_row(
+        "SELECT id, transaction_type, amount, direction, account_id,
+                linked_transaction_id, order_id,
+                liability_id, transaction_date, voided_at
+         FROM finance_transactions WHERE id = ?1",
+        rusqlite::params![id],
+        |row| {
+            Ok(RawFt {
+                id: row.get(0)?,
+                transaction_type: row.get(1)?,
+                amount: row.get(2)?,
+                direction: row.get(3)?,
+                account_id: row.get(4)?,
+                linked_transaction_id: row.get(5)?,
+                order_id: row.get(6)?,
+                liability_id: row.get(7)?,
+                transaction_date: row.get(8)?,
+                voided_at: row.get(9)?,
+            })
+        },
+    )
+    .map_err(|_| "Операция не найдена".to_string())
+}
+
+fn ensure_period_open(conn: &Connection, transaction_date: &str) -> Result<(), String> {
+    if transaction_date.len() < 7 {
+        return Ok(());
+    }
+    let period = &transaction_date[..7];
+    let closed: Option<String> = conn
+        .query_row(
+            "SELECT status FROM closing_periods WHERE period = ?1",
+            rusqlite::params![period],
+            |row| row.get(0),
+        )
+        .ok();
+    if matches!(closed.as_deref(), Some("closed")) {
+        return Err(format!(
+            "Период {period} закрыт — отмена/восстановление недоступны"
+        ));
+    }
+    Ok(())
+}
+
+fn adjust_account_balance(conn: &Connection, account_id: i64, delta: f64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE company_accounts SET balance = balance + ?1 WHERE id = ?2",
+        rusqlite::params![delta, account_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn void_transaction(
+    db: State<DbState>,
+    input: VoidTransactionInput,
+) -> Result<FinanceTransaction, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Cascade touches multiple tables — wrap in a transaction so a mid-cascade
+    // failure rolls back rather than leaving partial state.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let result = void_transaction_body(
+        &conn,
+        input.transaction_id,
+        &input.reason,
+        input.force.unwrap_or(false),
+    );
+    if result.is_ok() {
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    result
+}
+
+fn void_transaction_body(
+    conn: &Connection,
+    transaction_id: i64,
+    reason: &str,
+    force: bool,
+) -> Result<FinanceTransaction, String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("Укажите причину отмены".to_string());
+    }
+
+    let ft = fetch_raw_ft(conn, transaction_id)?;
+    if ft.voided_at.is_some() {
+        return Err("Операция уже отменена".to_string());
+    }
+    if !force {
+        ensure_period_open(conn, &ft.transaction_date)?;
+    }
+
+    apply_void_effects(conn, &ft)?;
+
+    conn.execute(
+        "UPDATE finance_transactions
+         SET voided_at = datetime('now'), voided_reason = ?1
+         WHERE id = ?2",
+        rusqlite::params![reason, transaction_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    if force {
+        reopen_closed_period(conn, &ft.transaction_date)?;
+    }
+
+    fetch_transaction(conn, transaction_id)
+}
+
+#[tauri::command]
+pub fn restore_transaction(
+    db: State<DbState>,
+    input: RestoreTransactionInput,
+) -> Result<FinanceTransaction, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let result = restore_transaction_body(
+        &conn,
+        input.transaction_id,
+        input.force.unwrap_or(false),
+    );
+    if result.is_ok() {
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    result
+}
+
+fn restore_transaction_body(
+    conn: &Connection,
+    transaction_id: i64,
+    force: bool,
+) -> Result<FinanceTransaction, String> {
+    let ft = fetch_raw_ft(conn, transaction_id)?;
+    if ft.voided_at.is_none() {
+        return Err("Операция активна — восстанавливать нечего".to_string());
+    }
+    if !force {
+        ensure_period_open(conn, &ft.transaction_date)?;
+    }
+
+    apply_restore_effects(conn, &ft)?;
+
+    conn.execute(
+        "UPDATE finance_transactions
+         SET voided_at = NULL, voided_reason = NULL
+         WHERE id = ?1",
+        rusqlite::params![transaction_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    if force {
+        reopen_closed_period(conn, &ft.transaction_date)?;
+    }
+
+    fetch_transaction(conn, transaction_id)
+}
+
+// When void/restore touches a closed period, drop the stale calculation:
+// flip status to 'open', clear closed_at, and delete profit_accrual entries
+// (paid-out profit/draw records stay — undoing those would be a separate decision).
+fn reopen_closed_period(conn: &Connection, transaction_date: &str) -> Result<(), String> {
+    if transaction_date.len() < 7 {
+        return Ok(());
+    }
+    let period = &transaction_date[..7];
+    let was_closed: bool = conn
+        .query_row(
+            "SELECT 1 FROM closing_periods WHERE period = ?1 AND status = 'closed'",
+            rusqlite::params![period],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !was_closed {
+        return Ok(());
+    }
+
+    conn.execute(
+        "DELETE FROM partner_settlement_entries
+         WHERE period = ?1 AND entry_type = 'profit_accrual'",
+        rusqlite::params![period],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "UPDATE closing_periods SET status = 'open', closed_at = NULL WHERE period = ?1",
+        rusqlite::params![period],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// Reverses the materialized side-effects of a transaction.
+// `restore` is symmetric (apply the same changes the original register did).
+fn apply_void_effects(conn: &Connection, ft: &RawFt) -> Result<(), String> {
+    apply_effects(conn, ft, -1.0)
+}
+
+fn apply_restore_effects(conn: &Connection, ft: &RawFt) -> Result<(), String> {
+    apply_effects(conn, ft, 1.0)
+}
+
+// sign = +1 applies the original effect (restore), -1 reverses it (void).
+fn apply_effects(conn: &Connection, ft: &RawFt, sign: f64) -> Result<(), String> {
+    match ft.transaction_type.as_str() {
+        "other_income_in" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            adjust_account_balance(conn, acc, sign * ft.amount)?;
+        }
+        "company_expense_out" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            adjust_account_balance(conn, acc, -sign * ft.amount)?;
+        }
+        "transfer_between_accounts" => {
+            // Reverse/apply both account balances, then mark/unmark linked side.
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            let mult = if ft.direction == "out" { -1.0 } else { 1.0 };
+            adjust_account_balance(conn, acc, sign * mult * ft.amount)?;
+
+            if let Some(linked_id) = ft.linked_transaction_id {
+                let other = fetch_raw_ft(conn, linked_id)?;
+                let other_acc = other.account_id.ok_or("Нет счёта у парной операции")?;
+                let other_mult = if other.direction == "out" { -1.0 } else { 1.0 };
+                adjust_account_balance(conn, other_acc, sign * other_mult * other.amount)?;
+
+                // Mirror voided state on the linked row
+                if sign < 0.0 {
+                    conn.execute(
+                        "UPDATE finance_transactions
+                         SET voided_at = datetime('now'),
+                             voided_reason = COALESCE(voided_reason, 'Парная операция к #' || ?1)
+                         WHERE id = ?2 AND voided_at IS NULL",
+                        rusqlite::params![ft.id, linked_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    conn.execute(
+                        "UPDATE finance_transactions
+                         SET voided_at = NULL, voided_reason = NULL
+                         WHERE id = ?1",
+                        rusqlite::params![linked_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "order_payment_in" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            let order_id = ft.order_id.ok_or("Платёж не привязан к заказу")?;
+            adjust_account_balance(conn, acc, sign * ft.amount)?;
+
+            // Find linked order_payment row to read surplus split
+            let payment: Option<(i64, f64)> = conn
+                .query_row(
+                    "SELECT id, surplus_to_balance FROM order_payments
+                     WHERE finance_transaction_id = ?1",
+                    rusqlite::params![ft.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+
+            let (payment_id, surplus) = payment.unwrap_or((0, 0.0));
+            let order_amount = ft.amount - surplus;
+
+            // Adjust order paid_amount (only the order-relevant portion)
+            if order_amount.abs() > 0.0001 {
+                if sign < 0.0 {
+                    // Voiding: ensure we don't push paid_amount negative
+                    let cur_paid: f64 = conn
+                        .query_row(
+                            "SELECT paid_amount FROM orders WHERE id = ?1",
+                            rusqlite::params![order_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    if cur_paid + sign * order_amount < -0.01 {
+                        return Err(format!(
+                            "Нельзя отменить: оплачено {:.2}, после отмены станет отрицательным",
+                            cur_paid
+                        ));
+                    }
+                }
+                conn.execute(
+                    "UPDATE orders SET paid_amount = paid_amount + ?1, updated_at = datetime('now')
+                     WHERE id = ?2",
+                    rusqlite::params![sign * order_amount, order_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            crate::commands::orders::recompute_payment_status(conn, order_id)?;
+
+            // Handle client balance surplus
+            if surplus.abs() > 0.01 {
+                if payment_id == 0 {
+                    return Err(
+                        "Не могу обработать связь с балансом клиента — пропущен order_payment"
+                            .to_string(),
+                    );
+                }
+                let surplus_tx: Option<(i64, i64)> = conn
+                    .query_row(
+                        "SELECT id, client_id FROM client_balance_transactions
+                         WHERE order_payment_id = ?1 AND transaction_type = 'order_surplus'",
+                        rusqlite::params![payment_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok();
+                let (cb_tx_id, client_id) = surplus_tx.ok_or_else(|| {
+                    "Операция изменила баланс клиента, но связь не сохранена. \
+                     Создайте корректирующую операцию вручную."
+                        .to_string()
+                })?;
+
+                adjust_client_balance(conn, client_id, sign * surplus)?;
+                set_voided(
+                    conn,
+                    "client_balance_transactions",
+                    cb_tx_id,
+                    sign < 0.0,
+                )?;
+            }
+
+            // Mark/unmark order_payment row
+            if payment_id > 0 {
+                set_voided(conn, "order_payments", payment_id, sign < 0.0)?;
+            }
+        }
+        "order_refund_out" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            let order_id = ft.order_id.ok_or("Возврат не привязан к заказу")?;
+            adjust_account_balance(conn, acc, -sign * ft.amount)?;
+
+            // Order paid_amount goes back UP when voiding a refund
+            conn.execute(
+                "UPDATE orders SET paid_amount = paid_amount + ?1, updated_at = datetime('now')
+                 WHERE id = ?2",
+                rusqlite::params![-sign * ft.amount, order_id],
+            )
+            .map_err(|e| e.to_string())?;
+            crate::commands::orders::recompute_payment_status(conn, order_id)?;
+
+            let refund_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM order_refunds WHERE finance_transaction_id = ?1",
+                    rusqlite::params![ft.id],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(rid) = refund_id {
+                set_voided(conn, "order_refunds", rid, sign < 0.0)?;
+            }
+        }
+        "supplier_debt_paid" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            let liability_id = ft.liability_id.ok_or("Оплата без обязательства")?;
+            adjust_account_balance(conn, acc, -sign * ft.amount)?;
+
+            let (orig, paid): (f64, f64) = conn
+                .query_row(
+                    "SELECT original_amount, paid_amount FROM liabilities WHERE id = ?1",
+                    rusqlite::params![liability_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| "Обязательство не найдено".to_string())?;
+
+            let new_paid = paid + sign * ft.amount;
+            if new_paid < -0.01 {
+                return Err("Нельзя отменить: оплачено меньше суммы операции".to_string());
+            }
+            let new_status = if (new_paid - orig).abs() < 0.01 {
+                "paid"
+            } else {
+                "open"
+            };
+            conn.execute(
+                "UPDATE liabilities SET paid_amount = ?1, status = ?2, updated_at = datetime('now')
+                 WHERE id = ?3",
+                rusqlite::params![new_paid, new_status, liability_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        "supplier_debt_opened" => {
+            let liability_id = ft.liability_id.ok_or("Нет обязательства")?;
+            let paid: f64 = conn
+                .query_row(
+                    "SELECT paid_amount FROM liabilities WHERE id = ?1",
+                    rusqlite::params![liability_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| "Обязательство не найдено".to_string())?;
+            if paid.abs() > 0.01 {
+                return Err(
+                    "Сначала отмените оплаты по этому обязательству".to_string(),
+                );
+            }
+            let new_status = if sign < 0.0 { "cancelled" } else { "open" };
+            conn.execute(
+                "UPDATE liabilities SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![new_status, liability_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        "partner_paid_company_expense" => {
+            // Two flavors: with account_id (contribution to account) or without (paid externally)
+            if let Some(acc) = ft.account_id {
+                adjust_account_balance(conn, acc, sign * ft.amount)?;
+            }
+            void_or_restore_settlement_for_ft(conn, ft.id, sign < 0.0)?;
+        }
+        "company_reimbursed_partner" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            adjust_account_balance(conn, acc, -sign * ft.amount)?;
+            void_or_restore_settlement_for_ft(conn, ft.id, sign < 0.0)?;
+        }
+        "partner_draw" | "partner_profit_payout" => {
+            let acc = ft.account_id.ok_or("Нет счёта у операции")?;
+            adjust_account_balance(conn, acc, -sign * ft.amount)?;
+            void_or_restore_settlement_for_ft(conn, ft.id, sign < 0.0)?;
+        }
+        "adjustment" => match ft.direction.as_str() {
+            "in" => {
+                if let Some(acc) = ft.account_id {
+                    adjust_account_balance(conn, acc, sign * ft.amount)?;
+                }
+            }
+            "out" => {
+                if let Some(acc) = ft.account_id {
+                    adjust_account_balance(conn, acc, -sign * ft.amount)?;
+                }
+            }
+            _ => {}
+        },
+        other => {
+            return Err(format!("Тип операции '{other}' пока не поддерживает отмену"));
+        }
+    }
+    Ok(())
+}
+
+fn adjust_client_balance(conn: &Connection, client_id: i64, delta: f64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE clients SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![delta, client_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn set_voided(conn: &Connection, table: &str, id: i64, void: bool) -> Result<(), String> {
+    let sql = if void {
+        format!("UPDATE {table} SET voided_at = datetime('now') WHERE id = ?1")
+    } else {
+        format!("UPDATE {table} SET voided_at = NULL WHERE id = ?1")
+    };
+    conn.execute(&sql, rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn void_or_restore_settlement_for_ft(
+    conn: &Connection,
+    ft_id: i64,
+    void: bool,
+) -> Result<(), String> {
+    let sql = if void {
+        "UPDATE partner_settlement_entries SET voided_at = datetime('now')
+         WHERE finance_transaction_id = ?1 AND voided_at IS NULL"
+    } else {
+        "UPDATE partner_settlement_entries SET voided_at = NULL
+         WHERE finance_transaction_id = ?1"
+    };
+    conn.execute(sql, rusqlite::params![ft_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

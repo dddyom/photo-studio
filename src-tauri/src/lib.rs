@@ -141,6 +141,7 @@ pub fn run() {
             commands::orders::update_production_status,
             commands::orders::update_delivery_status,
             commands::orders::list_orders,
+            commands::orders::delete_order,
             // Order items
             commands::order_items::list_order_items,
             commands::order_items::add_book_item,
@@ -188,9 +189,12 @@ pub fn run() {
             commands::finance::register_partner_draw,
             commands::finance::register_partner_profit_payout,
             commands::finance::list_partner_settlements,
+            commands::finance::list_partner_summaries,
             commands::finance::close_period,
             commands::finance::list_closing_periods,
             commands::finance::get_finance_summary,
+            commands::finance::void_transaction,
+            commands::finance::restore_transaction,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

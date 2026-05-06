@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import { finance, type CompanyAccount, type PartnerSummary } from "@/infrastructure/tauri-bridge";
@@ -12,10 +12,40 @@ import { FinanceNav } from "./FinanceNav";
 
 const INPUT = "w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15";
 
+type Period = "month" | "year" | "all";
+
+const MONTH_NAMES = [
+  "январь", "февраль", "март", "апрель", "май", "июнь",
+  "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+];
+
+function periodRange(period: Period): { from: string | null; to: string | null; label: string } {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  if (period === "month") {
+    const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+    const last = new Date(y, m + 1, 0).getDate();
+    const to = `${y}-${String(m + 1).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+    return { from, to, label: `${MONTH_NAMES[m]} ${y}` };
+  }
+  if (period === "year") {
+    return { from: `${y}-01-01`, to: `${y}-12-31`, label: `${y}` };
+  }
+  return { from: null, to: null, label: "всё время" };
+}
+
 export function PartnerSettlements() {
-  const { data: summary, refetch: refetchSummary } = useTauriCommand(
-    useCallback(() => finance.getSummary(), []),
-    []
+  const [period, setPeriod] = useState<Period>("month");
+  const range = useMemo(() => periodRange(period), [period]);
+
+  const fetchSummaries = useCallback(
+    () => finance.listPartnerSummaries({ date_from: range.from, date_to: range.to }),
+    [range.from, range.to],
+  );
+  const { data: partnerSummaries, refetch: refetchSummary } = useTauriCommand(
+    fetchSummaries,
+    [range.from, range.to],
   );
   const { data: entries, refetch: refetchEntries } = useTauriCommand(
     useCallback(() => finance.listPartnerSettlements(), []),
@@ -27,7 +57,7 @@ export function PartnerSettlements() {
   );
 
   const activeAccounts = (accounts ?? []).filter((a) => a.is_active);
-  const partners = summary?.partner_summaries ?? [];
+  const partners = partnerSummaries ?? [];
 
   const [modal, setModal] = useState<{
     type: "contribution" | "reimbursement" | "draw" | "profit_payout";
@@ -48,12 +78,35 @@ export function PartnerSettlements() {
       </div>
       <FinanceNav />
 
+      {/* Period selector */}
+      <div className="flex items-center gap-2 mb-4">
+        <span className="text-sm text-gray-500">Активность:</span>
+        {([
+          { key: "month" as const, label: "Этот месяц" },
+          { key: "year" as const, label: "Этот год" },
+          { key: "all" as const, label: "За всё время" },
+        ]).map((opt) => (
+          <button
+            key={opt.key}
+            onClick={() => setPeriod(opt.key)}
+            className={`px-3 py-1 text-xs rounded transition-colors ${
+              period === opt.key
+                ? "bg-blue-600 text-white"
+                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
       {/* Partner cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
         {partners.map((ps) => (
           <PartnerCard
             key={ps.partner_id}
             partner={ps}
+            periodLabel={range.label}
             onAction={(type) =>
               setModal({ type, partnerId: ps.partner_id, partnerName: ps.partner_name })
             }
@@ -135,18 +188,22 @@ export function PartnerSettlements() {
 
 function PartnerCard({
   partner,
+  periodLabel,
   onAction,
 }: {
   partner: PartnerSummary;
+  periodLabel: string;
   onAction: (type: "contribution" | "reimbursement" | "draw" | "profit_payout") => void;
 }) {
   const ps = partner;
+  const totalWithdrawn = ps.profit_paid + ps.draws;
   const rows = [
     { label: "Вложено в бизнес", value: ps.contributions, hint: SETTLEMENT_TYPE_HINTS.contribution, positive: true },
-    { label: "Начислено прибыли", value: ps.profit_accrued, hint: SETTLEMENT_TYPE_HINTS.profit_accrual, positive: true },
-    { label: "Выплачено прибыли", value: ps.profit_paid, hint: SETTLEMENT_TYPE_HINTS.profit_payout, positive: false },
-    { label: "Draw (авансы)", value: ps.draws, hint: SETTLEMENT_TYPE_HINTS.draw, positive: false },
     { label: "Возвращено вложений", value: ps.reimbursements, hint: SETTLEMENT_TYPE_HINTS.reimbursement, positive: false },
+  ];
+  const withdrawals = [
+    { label: "Выплачено прибыли", value: ps.profit_paid, hint: SETTLEMENT_TYPE_HINTS.profit_payout },
+    { label: "Draw (авансы)", value: ps.draws, hint: SETTLEMENT_TYPE_HINTS.draw },
   ];
   if (ps.adjustments !== 0) {
     rows.push({ label: "Корректировки", value: ps.adjustments, hint: "", positive: ps.adjustments > 0 });
@@ -154,8 +211,33 @@ function PartnerCard({
 
   return (
     <div className="bg-white border border-gray-200 rounded-md p-5">
-      <h3 className="text-lg font-semibold mb-4">{ps.partner_name}</h3>
+      <div className="flex items-baseline justify-between mb-4">
+        <h3 className="text-lg font-semibold">{ps.partner_name}</h3>
+      </div>
 
+      {/* Lifetime balance: company's standing debt to partner */}
+      <div className="bg-gray-50 rounded-md p-3 mb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium">
+              {ps.balance >= 0
+                ? "Компания должна партнёру"
+                : "Партнёр должен компании"}
+            </div>
+            <div className="text-xs text-gray-400 mt-0.5">
+              За всё время. = вложения − возмещения
+            </div>
+          </div>
+          <span className={`text-xl font-bold font-mono ${ps.balance >= 0 ? "text-blue-600" : "text-red-600"}`}>
+            {formatMoney(Math.abs(ps.balance))} ₸
+          </span>
+        </div>
+      </div>
+
+      {/* Period activity */}
+      <div className="text-xs uppercase tracking-wide text-gray-400 mb-2">
+        Активность · {periodLabel}
+      </div>
       <div className="space-y-2">
         {rows.map((r) => (
           <div key={r.label} className="flex items-center justify-between text-sm group">
@@ -167,21 +249,19 @@ function PartnerCard({
         ))}
       </div>
 
-      <div className="border-t border-gray-200 mt-4 pt-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm font-medium">
-              {ps.balance >= 0
-                ? "Компания должна партнёру"
-                : "Партнёр должен компании"}
+      <div className="border-t border-gray-200 mt-3 pt-3">
+        <div className="text-xs uppercase tracking-wide text-gray-400 mb-2">Выведено · {periodLabel}</div>
+        <div className="space-y-1">
+          {withdrawals.map((w) => (
+            <div key={w.label} className="flex items-center justify-between text-sm">
+              <span className="text-gray-600" title={w.hint}>{w.label}</span>
+              <span className="font-mono text-gray-700">{formatMoney(w.value)}</span>
             </div>
-            <div className="text-xs text-gray-400 mt-0.5">
-              = вложения + прибыль − выплаты − draw − возмещения
-            </div>
+          ))}
+          <div className="flex items-center justify-between text-sm font-medium pt-1 border-t border-gray-100">
+            <span className="text-gray-700">Итого снятий</span>
+            <span className="font-mono">{formatMoney(totalWithdrawn)} ₸</span>
           </div>
-          <span className={`text-xl font-bold font-mono ${ps.balance >= 0 ? "text-blue-600" : "text-red-600"}`}>
-            {formatMoney(Math.abs(ps.balance))} ₸
-          </span>
         </div>
       </div>
 

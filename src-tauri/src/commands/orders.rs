@@ -52,6 +52,9 @@ pub struct OrderListFilter {
     pub date_to: Option<String>,
     pub unpaid_only: Option<bool>,
     pub delivered_but_unpaid: Option<bool>,
+    /// When false (default), cancelled orders are hidden unless the caller
+    /// explicitly filters by production_status='cancelled'.
+    pub include_cancelled: Option<bool>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -358,6 +361,158 @@ pub fn update_delivery_status(
 }
 
 #[tauri::command]
+pub fn delete_order(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let result = delete_order_body(&conn, id);
+    if result.is_ok() {
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    result
+}
+
+// Hard-delete an order. Allowed only for draft/cancelled orders with no
+// financial trace — payments, refunds, deliveries, production log, or
+// linked client-balance transactions block deletion (caller must void those
+// in the finance journal first). Deletion cascades to order_items and their
+// per-kind detail rows.
+fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
+    let status: String = conn
+        .query_row(
+            "SELECT production_status FROM orders WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Заказ не найден".to_string())?;
+
+    if !matches!(status.as_str(), "draft" | "cancelled") {
+        return Err(format!(
+            "Удалять можно только черновики или отменённые заказы (текущий статус: {status}). \
+             Сначала отмените заказ."
+        ));
+    }
+
+    // Block when any financial trace exists. We check non-voided rows only —
+    // voided ones don't affect balances, so they're safe to wipe with the order.
+    let has_payments: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_payments WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_payments {
+        return Err(
+            "У заказа есть оплаты. Сначала отмените их в журнале финансов.".to_string(),
+        );
+    }
+
+    let has_refunds: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_refunds WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_refunds {
+        return Err(
+            "У заказа есть возвраты. Сначала отмените их в журнале финансов.".to_string(),
+        );
+    }
+
+    let has_deliveries: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_deliveries WHERE order_id = ?1 LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_deliveries {
+        return Err("У заказа есть отметки выдачи — удаление недоступно.".to_string());
+    }
+
+    let has_balance_tx: bool = conn
+        .query_row(
+            "SELECT 1 FROM client_balance_transactions
+             WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_balance_tx {
+        return Err(
+            "По заказу были операции с балансом клиента. Сначала отмените их.".to_string(),
+        );
+    }
+
+    let has_production_log: bool = conn
+        .query_row(
+            "SELECT 1 FROM production_log pl
+             JOIN order_items oi ON oi.id = pl.order_item_id
+             WHERE oi.order_id = ?1 LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_production_log {
+        return Err("По заказу был запущен производственный процесс — удаление недоступно.".to_string());
+    }
+
+    // Cascade delete: per-item detail tables → items → voided payments/refunds/balance tx → order
+    conn.execute(
+        "DELETE FROM order_item_books WHERE order_item_id IN
+            (SELECT id FROM order_items WHERE order_id = ?1)",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM order_item_prints WHERE order_item_id IN
+            (SELECT id FROM order_items WHERE order_id = ?1)",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM order_item_extras WHERE order_item_id IN
+            (SELECT id FROM order_items WHERE order_id = ?1)",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM order_items WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    // Voided rows (passed the checks above) get wiped along with the order
+    conn.execute(
+        "DELETE FROM order_payments WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM order_refunds WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM client_balance_transactions WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    // finance_transactions referencing this order: NULL out order_id so the
+    // history record stays intact (though it shouldn't exist non-voided here)
+    conn.execute(
+        "UPDATE finance_transactions SET order_id = NULL WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute("DELETE FROM orders WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Order>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -409,6 +564,12 @@ pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Or
     if filter.delivered_but_unpaid == Some(true) {
         conditions.push("o.delivery_status = 'delivered'".to_string());
         conditions.push("o.payment_status IN ('unpaid', 'partial')".to_string());
+    }
+
+    // Hide cancelled by default unless caller asked for them or filtered explicitly
+    let explicit_cancelled = filter.production_status.as_deref() == Some("cancelled");
+    if !explicit_cancelled && !filter.include_cancelled.unwrap_or(false) {
+        conditions.push("o.production_status != 'cancelled'".to_string());
     }
 
     let where_clause = if conditions.is_empty() {

@@ -307,6 +307,7 @@ export interface OrderListFilter {
   date_to?: string | null;
   unpaid_only?: boolean | null;
   delivered_but_unpaid?: boolean | null;
+  include_cancelled?: boolean | null;
 }
 
 // ── Order item types ─────────────────────────────────────────────────
@@ -551,6 +552,8 @@ export interface FinanceTransaction {
   description: string | null;
   transaction_date: string;
   created_at: string;
+  voided_at: string | null;
+  voided_reason: string | null;
 }
 
 export interface Liability {
@@ -796,6 +799,7 @@ export const orders = {
     invoke<Order>("update_production_status", { id, status }),
   updateDeliveryStatus: (id: number, status: string) =>
     invoke<Order>("update_delivery_status", { id, status }),
+  delete: (id: number) => invoke<void>("delete_order", { id }),
 };
 
 // ── Order item commands ──────────────────────────────────────────────
@@ -960,10 +964,23 @@ export const finance = {
   listPartnerSettlements: (partnerId?: number | null) =>
     invoke<PartnerSettlementEntry[]>("list_partner_settlements", { partnerId }),
 
+  listPartnerSummaries: (filter: { date_from?: string | null; date_to?: string | null } = {}) =>
+    invoke<PartnerSummary[]>("list_partner_summaries", { filter }),
+
   closePeriod: (input: { period: string; force?: boolean | null }) =>
     invoke<ClosingPeriod>("close_period", { input }),
 
   listClosingPeriods: () => invoke<ClosingPeriod[]>("list_closing_periods"),
 
   getSummary: () => invoke<FinanceSummary>("get_finance_summary"),
+
+  voidTransaction: (transaction_id: number, reason: string, force = false) =>
+    invoke<FinanceTransaction>("void_transaction", {
+      input: { transaction_id, reason, force },
+    }),
+
+  restoreTransaction: (transaction_id: number, force = false) =>
+    invoke<FinanceTransaction>("restore_transaction", {
+      input: { transaction_id, force },
+    }),
 };

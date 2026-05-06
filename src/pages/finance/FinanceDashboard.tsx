@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import { finance } from "@/infrastructure/tauri-bridge";
@@ -7,11 +7,35 @@ import { FinanceNav } from "./FinanceNav";
 import { IncomeExpenseModal } from "./components/IncomeExpenseModal";
 import { TransferModal } from "./components/TransferModal";
 
+const MONTH_NAMES = [
+  "январь", "февраль", "март", "апрель", "май", "июнь",
+  "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+];
+
+function currentMonthRange(): { from: string; to: string; label: string } {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  const last = new Date(y, m + 1, 0).getDate();
+  const to = `${y}-${String(m + 1).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+  return { from, to, label: `${MONTH_NAMES[m]} ${y}` };
+}
+
 export function FinanceDashboard() {
   const navigate = useNavigate();
+  const monthRange = useMemo(currentMonthRange, []);
+
   const { data: summary, refetch } = useTauriCommand(
     useCallback(() => finance.getSummary(), []),
     []
+  );
+  const { data: monthlyPartners } = useTauriCommand(
+    useCallback(
+      () => finance.listPartnerSummaries({ date_from: monthRange.from, date_to: monthRange.to }),
+      [monthRange.from, monthRange.to],
+    ),
+    [monthRange.from, monthRange.to],
   );
   const { data: accounts } = useTauriCommand(
     useCallback(() => finance.listAccounts(), []),
@@ -119,21 +143,16 @@ export function FinanceDashboard() {
                 <div className="text-lg font-semibold mt-1 text-blue-600">Все транзакции &rarr;</div>
                 <div className="text-xs text-gray-400 mt-1">Доходы, расходы, переводы</div>
               </div>
-              <div
-                className="bg-white border border-gray-200 rounded-md p-4 cursor-pointer hover:border-gray-300 transition-colors"
-                onClick={() => navigate("/finance/closing")}
-              >
-                <div className="text-sm text-gray-500">Закрытие периода</div>
-                <div className="text-lg font-semibold mt-1 text-blue-600">Прибыль и начисления &rarr;</div>
-                <div className="text-xs text-gray-400 mt-1">Cash-basis расчёт, деление 50/50</div>
-              </div>
             </div>
           </section>
 
           {/* Partner summaries */}
           <section>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-medium">Расчёты с партнёрами</h2>
+              <h2 className="text-lg font-medium">
+                Расчёты с партнёрами{" "}
+                <span className="text-sm text-gray-400 font-normal">· {monthRange.label}</span>
+              </h2>
               <button
                 onClick={() => navigate("/finance/partners")}
                 className="text-sm text-blue-600 hover:text-blue-800"
@@ -142,7 +161,7 @@ export function FinanceDashboard() {
               </button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {summary.partner_summaries.map((ps) => (
+              {(monthlyPartners ?? []).map((ps) => (
                 <div
                   key={ps.partner_id}
                   className="bg-white border border-gray-200 rounded-md p-4 cursor-pointer hover:border-gray-300 transition-colors"
@@ -152,21 +171,24 @@ export function FinanceDashboard() {
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
                     <div className="text-gray-500">Вложено:</div>
                     <div className="text-right font-mono">{formatMoney(ps.contributions)}</div>
-                    <div className="text-gray-500">Начислено прибыли:</div>
-                    <div className="text-right font-mono">{formatMoney(ps.profit_accrued)}</div>
+                    <div className="text-gray-500">Возмещения:</div>
+                    <div className="text-right font-mono">{formatMoney(ps.reimbursements)}</div>
                     <div className="text-gray-500">Выплачено прибыли:</div>
                     <div className="text-right font-mono">{formatMoney(ps.profit_paid)}</div>
                     <div className="text-gray-500">Draw (авансы):</div>
                     <div className="text-right font-mono">{formatMoney(ps.draws)}</div>
-                    <div className="text-gray-500">Возмещения:</div>
-                    <div className="text-right font-mono">{formatMoney(ps.reimbursements)}</div>
+                    <div className="text-gray-500 font-medium pt-1 border-t border-gray-100">Снято всего:</div>
+                    <div className="text-right font-mono font-medium pt-1 border-t border-gray-100">{formatMoney(ps.profit_paid + ps.draws)}</div>
                   </div>
                   <div className="border-t border-gray-100 mt-3 pt-3 flex items-center justify-between">
-                    <span className="font-medium">
-                      {ps.balance >= 0
-                        ? "Компания должна партнёру"
-                        : "Партнёр должен компании"}
-                    </span>
+                    <div>
+                      <div className="font-medium">
+                        {ps.balance >= 0
+                          ? "Компания должна партнёру"
+                          : "Партнёр должен компании"}
+                      </div>
+                      <div className="text-xs text-gray-400">за всё время</div>
+                    </div>
                     <span className={`text-xl font-bold font-mono ${ps.balance >= 0 ? "text-blue-600" : "text-red-600"}`}>
                       {formatMoney(Math.abs(ps.balance))} ₸
                     </span>

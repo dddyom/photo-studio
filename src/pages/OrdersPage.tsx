@@ -75,11 +75,14 @@ export function OrdersPage() {
   const isCreating = id === "new";
 
   const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
+  const [showCancelled, setShowCancelled] = useState(false);
   const [search, setSearch] = useState("");
 
-  const filter = quickFilterToApi(quickFilter);
-  const fetchOrders = useCallback(() => orders.list(filter), [quickFilter]);
-  const { data: orderList, loading: listLoading, refetch: refetchList } = useTauriCommand(fetchOrders, [quickFilter]);
+  const filter: OrderListFilter = showCancelled
+    ? { production_status: "cancelled" }
+    : quickFilterToApi(quickFilter);
+  const fetchOrders = useCallback(() => orders.list(filter), [quickFilter, showCancelled]);
+  const { data: orderList, loading: listLoading, refetch: refetchList } = useTauriCommand(fetchOrders, [quickFilter, showCancelled]);
 
   const filtered = (orderList ?? []).filter((o) => {
     if (!search) return true;
@@ -118,9 +121,9 @@ export function OrdersPage() {
             {QUICK_FILTERS.map((f) => (
               <button
                 key={f.key}
-                onClick={() => setQuickFilter(f.key)}
+                onClick={() => { setQuickFilter(f.key); setShowCancelled(false); }}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
-                  quickFilter === f.key
+                  quickFilter === f.key && !showCancelled
                     ? "bg-blue-600 text-white"
                     : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                 }`}
@@ -128,6 +131,17 @@ export function OrdersPage() {
                 {f.label}
               </button>
             ))}
+            <button
+              onClick={() => setShowCancelled((v) => !v)}
+              title="Показать только отменённые заказы"
+              className={`px-2 py-1 text-xs rounded transition-colors ${
+                showCancelled
+                  ? "bg-gray-700 text-white"
+                  : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+              }`}
+            >
+              Отменённые
+            </button>
           </div>
           <input
             type="text"
@@ -189,7 +203,11 @@ export function OrdersPage() {
             onCancel={() => navigate("/orders")}
           />
         ) : selectedId ? (
-          <OrderDetail orderId={selectedId} onOrderChanged={refetchList} />
+          <OrderDetail
+            orderId={selectedId}
+            onOrderChanged={refetchList}
+            onOrderDeleted={() => { refetchList(); navigate("/orders"); }}
+          />
         ) : (
           <div className="flex items-center justify-center h-full text-gray-400">
             Выберите заказ или создайте новый
@@ -291,10 +309,11 @@ function CreateOrderPanel({
 // ── Order detail ────────────────────────────────────────────────────
 
 function OrderDetail({
-  orderId, onOrderChanged,
+  orderId, onOrderChanged, onOrderDeleted,
 }: {
   orderId: number;
   onOrderChanged: () => void;
+  onOrderDeleted: () => void;
 }) {
   const fetchOrder = useCallback(() => orders.get(orderId), [orderId]);
   const fetchItems = useCallback(() => orderItems.list(orderId), [orderId]);
@@ -355,9 +374,14 @@ function OrderDetail({
       </div>
 
       {/* Actions */}
-      {!isCancelled && (
-        <ActionBar order={order} onRefresh={refetchAll} onAddItem={() => setItemPanelMode("add")} onPayment={() => setShowPayment(true)} onDelivery={() => setShowDelivery(true)} />
-      )}
+      <ActionBar
+        order={order}
+        onRefresh={refetchAll}
+        onAddItem={() => setItemPanelMode("add")}
+        onPayment={() => setShowPayment(true)}
+        onDelivery={() => setShowDelivery(true)}
+        onDeleted={onOrderDeleted}
+      />
 
       {/* Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
@@ -618,14 +642,17 @@ function NotesBlock({ order, onSaved }: { order: Order; onSaved: () => void }) {
 // ── Action bar ──────────────────────────────────────────────────────
 
 function ActionBar({
-  order, onRefresh, onAddItem, onPayment, onDelivery,
+  order, onRefresh, onAddItem, onPayment, onDelivery, onDeleted,
 }: {
   order: Order;
   onRefresh: () => void;
   onAddItem: () => void;
   onPayment: () => void;
   onDelivery: () => void;
+  onDeleted: () => void;
 }) {
+  const isCancelled = order.production_status === "cancelled";
+  const isDraft = order.production_status === "draft";
   const nextStatus = getNextProductionStatus(order.production_status);
 
   const nextLabel = order.production_status === "draft" ? "Начать" :
@@ -646,24 +673,47 @@ function ActionBar({
     } catch (err) { toast.error(String(err)); }
   };
 
+  const handleDelete = async () => {
+    if (!confirm(`Удалить заказ ${order.number} полностью? Это действие необратимо.`)) return;
+    try {
+      await orders.delete(order.id);
+      toast.success("Заказ удалён");
+      onDeleted();
+    } catch (err) {
+      toast.error(String(err), { duration: 7000 });
+    }
+  };
+
   const canAddItems = ["draft", "in_work"].includes(order.production_status);
+  const canDelete = isDraft || isCancelled;
 
   return (
     <div className="flex flex-wrap gap-2">
       {canAddItems && (
         <button onClick={onAddItem} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors">+ Позиция</button>
       )}
-      {nextStatus && (
+      {nextStatus && !isCancelled && (
         <button onClick={() => changeStatus(nextStatus)} className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors">
           {nextLabel}
         </button>
       )}
-      <button onClick={onPayment} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Оплата</button>
+      {!isCancelled && (
+        <button onClick={onPayment} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Оплата</button>
+      )}
       {!["draft", "cancelled"].includes(order.production_status) && (
         <button onClick={onDelivery} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Выдать</button>
       )}
       {["draft", "in_work"].includes(order.production_status) && (
         <button onClick={() => changeStatus("cancelled")} className="px-3 py-1.5 text-red-600 border border-red-200 bg-white text-sm rounded-md hover:bg-red-50 transition-colors">Отменить</button>
+      )}
+      {canDelete && (
+        <button
+          onClick={handleDelete}
+          title="Полное удаление. Доступно только для черновиков и отменённых заказов без оплат и активности."
+          className="px-3 py-1.5 text-red-700 border border-red-300 bg-white text-sm rounded-md hover:bg-red-50 transition-colors"
+        >
+          Удалить
+        </button>
       )}
     </div>
   );

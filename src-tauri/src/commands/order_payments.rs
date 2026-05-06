@@ -139,25 +139,7 @@ pub fn register_payment(
     )
     .map_err(|e| e.to_string())?;
 
-    // 3. Insert payment record
-    conn.execute(
-        "INSERT INTO order_payments (order_id, amount, payment_method, account_id,
-            finance_transaction_id, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            input.order_id,
-            input.amount,
-            input.payment_method,
-            input.account_id,
-            fin_tx_id,
-            input.notes,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    let payment_id = conn.last_insert_rowid();
-
-    // 4. Get order totals to check for surplus
+    // 3. Get order totals to check for surplus (before insert, to set surplus_to_balance)
     let (total_amount, paid_before, client_id): (f64, f64, i64) = conn
         .query_row(
             "SELECT total_amount, paid_amount, client_id FROM orders WHERE id = ?1",
@@ -168,17 +150,33 @@ pub fn register_payment(
 
     let paid_after = paid_before + input.amount;
     let surplus = if paid_after > total_amount && total_amount > 0.0 {
-        // Only the part that exceeds the total is surplus
         let overpay = paid_after - total_amount;
-        // But if there was already an overpayment, only count the new excess
         let prev_overpay = (paid_before - total_amount).max(0.0);
         overpay - prev_overpay
     } else {
         0.0
     };
 
-    // Amount that goes to the order (not to client balance)
     let order_amount = input.amount - surplus;
+
+    // 4. Insert payment record (with surplus split tracked)
+    conn.execute(
+        "INSERT INTO order_payments (order_id, amount, payment_method, account_id,
+            finance_transaction_id, notes, surplus_to_balance)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            input.order_id,
+            input.amount,
+            input.payment_method,
+            input.account_id,
+            fin_tx_id,
+            input.notes,
+            surplus,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let payment_id = conn.last_insert_rowid();
 
     // 4a. Update order paid_amount (only the order-relevant portion)
     if order_amount > 0.0 {
@@ -190,10 +188,10 @@ pub fn register_payment(
         .map_err(|e| e.to_string())?;
     }
 
-    // 4b. If there's surplus, deposit it to client balance
+    // 4b. If there's surplus, deposit it to client balance (linked via payment_id)
     if surplus > 0.01 {
         crate::commands::client_balance::record_order_surplus(
-            &conn, client_id, input.order_id, surplus,
+            &conn, client_id, input.order_id, payment_id, surplus,
         )?;
     }
 
@@ -402,7 +400,7 @@ pub fn list_order_payments(
         .prepare(
             "SELECT id, order_id, amount, payment_method, account_id,
                     finance_transaction_id, notes, paid_at, created_at
-             FROM order_payments WHERE order_id = ?1 ORDER BY paid_at",
+             FROM order_payments WHERE order_id = ?1 AND voided_at IS NULL ORDER BY paid_at",
         )
         .map_err(|e| e.to_string())?;
 
@@ -434,7 +432,7 @@ pub fn list_order_refunds(db: State<DbState>, order_id: i64) -> Result<Vec<Order
         .prepare(
             "SELECT id, order_id, amount, payment_method, account_id,
                     finance_transaction_id, reason, refunded_at, created_at
-             FROM order_refunds WHERE order_id = ?1 ORDER BY refunded_at",
+             FROM order_refunds WHERE order_id = ?1 AND voided_at IS NULL ORDER BY refunded_at",
         )
         .map_err(|e| e.to_string())?;
 

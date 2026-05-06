@@ -604,6 +604,86 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         CREATE INDEX idx_client_balance_tx_client ON client_balance_transactions(client_id);
         CREATE INDEX idx_client_balance_tx_order  ON client_balance_transactions(order_id);
     "),
+
+    // ── v20: Voidable finance transactions ──────────────────────────────
+    // Soft-cancel for finance ops: keeps row in history, reverses side-effects.
+    // surplus_to_balance + order_payment_id link order_payment_in → client surplus
+    // so the cascade can undo the client balance deposit.
+    (20, "voidable finance transactions", "
+        ALTER TABLE finance_transactions ADD COLUMN voided_at TEXT;
+        ALTER TABLE finance_transactions ADD COLUMN voided_reason TEXT;
+
+        ALTER TABLE partner_settlement_entries ADD COLUMN voided_at TEXT;
+        ALTER TABLE order_payments ADD COLUMN voided_at TEXT;
+        ALTER TABLE order_payments ADD COLUMN surplus_to_balance REAL NOT NULL DEFAULT 0;
+        ALTER TABLE order_refunds ADD COLUMN voided_at TEXT;
+        ALTER TABLE client_balance_transactions ADD COLUMN voided_at TEXT;
+        ALTER TABLE client_balance_transactions ADD COLUMN order_payment_id INTEGER REFERENCES order_payments(id);
+    "),
+
+    // ── v21: Fix overpaid orders caused by pay_order_from_balance bug ───
+    // Older versions of pay_order_from_balance allowed paying more than the
+    // remaining debt — the excess was silently drained from client balance
+    // into orders.paid_amount, leaving the order overpaid and the client
+    // short. We refund the portion attributable to balance payments back
+    // onto the client's balance and reset paid_amount/payment_status.
+    // Idempotent: targets only orders where paid_amount > total_amount.
+    (21, "refund balance overpayments on overpaid orders", "
+        CREATE TEMPORARY TABLE _v21_overpay_fix AS
+        SELECT
+          o.id          AS order_id,
+          o.number      AS order_number,
+          o.client_id   AS client_id,
+          MIN(
+            o.paid_amount - o.total_amount,
+            COALESCE((
+              SELECT SUM(amount) FROM client_balance_transactions
+              WHERE order_id = o.id AND transaction_type = 'order_payment'
+                AND voided_at IS NULL
+            ), 0)
+            - COALESCE((
+              SELECT SUM(amount) FROM client_balance_transactions
+              WHERE order_id = o.id AND transaction_type = 'order_surplus'
+                AND voided_at IS NULL
+            ), 0)
+          ) AS refund_amount
+        FROM orders o
+        WHERE o.paid_amount > o.total_amount + 0.01;
+
+        DELETE FROM _v21_overpay_fix WHERE refund_amount < 0.01;
+
+        INSERT INTO client_balance_transactions
+          (client_id, amount, direction, transaction_type, order_id, notes)
+        SELECT client_id, refund_amount, 'in', 'order_surplus', order_id,
+               'Миграция v21: возврат излишка по переплаченному заказу ' || order_number
+        FROM _v21_overpay_fix;
+
+        UPDATE clients SET
+          balance = balance + COALESCE((
+            SELECT SUM(refund_amount) FROM _v21_overpay_fix
+            WHERE client_id = clients.id
+          ), 0),
+          updated_at = datetime('now')
+        WHERE id IN (SELECT DISTINCT client_id FROM _v21_overpay_fix);
+
+        UPDATE orders SET
+          paid_amount = paid_amount - (
+            SELECT refund_amount FROM _v21_overpay_fix WHERE order_id = orders.id
+          ),
+          payment_status = CASE
+            WHEN paid_amount - (SELECT refund_amount FROM _v21_overpay_fix WHERE order_id = orders.id) <= 0
+              THEN 'unpaid'
+            WHEN ABS(paid_amount - (SELECT refund_amount FROM _v21_overpay_fix WHERE order_id = orders.id) - total_amount) < 0.01
+              THEN 'paid'
+            WHEN paid_amount - (SELECT refund_amount FROM _v21_overpay_fix WHERE order_id = orders.id) > total_amount
+              THEN 'overpaid'
+            ELSE 'partial'
+          END,
+          updated_at = datetime('now')
+        WHERE id IN (SELECT order_id FROM _v21_overpay_fix);
+
+        DROP TABLE _v21_overpay_fix;
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

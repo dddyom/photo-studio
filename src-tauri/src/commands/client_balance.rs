@@ -66,11 +66,13 @@ fn get_client_balance(conn: &rusqlite::Connection, client_id: i64) -> Result<f64
 }
 
 /// Record surplus from order overpayment onto client balance.
-/// Called from register_payment when paid > total.
+/// Called from register_payment when paid > total. The order_payment_id link
+/// lets void_transaction find this surplus entry to undo it.
 pub(crate) fn record_order_surplus(
     conn: &rusqlite::Connection,
     client_id: i64,
     order_id: i64,
+    order_payment_id: i64,
     surplus: f64,
 ) -> Result<(), String> {
     // 1. Update client balance
@@ -83,12 +85,13 @@ pub(crate) fn record_order_surplus(
     // 2. Record balance transaction
     conn.execute(
         "INSERT INTO client_balance_transactions
-            (client_id, amount, direction, transaction_type, order_id, notes)
-         VALUES (?1, ?2, 'in', 'order_surplus', ?3, ?4)",
+            (client_id, amount, direction, transaction_type, order_id, order_payment_id, notes)
+         VALUES (?1, ?2, 'in', 'order_surplus', ?3, ?4, ?5)",
         rusqlite::params![
             client_id,
             surplus,
             order_id,
+            order_payment_id,
             format!("Излишек по оплате заказа"),
         ],
     )
@@ -316,16 +319,27 @@ pub fn pay_order_from_balance(
     }
 
     // Get order info
-    let (client_id, prod_status): (i64, String) = conn
+    let (client_id, prod_status, total_amount, paid_amount): (i64, String, f64, f64) = conn
         .query_row(
-            "SELECT client_id, production_status FROM orders WHERE id = ?1",
+            "SELECT client_id, production_status, total_amount, paid_amount
+             FROM orders WHERE id = ?1",
             rusqlite::params![input.order_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|_| "Заказ не найден".to_string())?;
 
     if prod_status == "cancelled" {
         return Err("Нельзя оплатить отменённый заказ".to_string());
+    }
+
+    // Reject overpayment from balance — caller should pass remaining debt.
+    // Otherwise client balance silently leaks into overpaid orders.
+    let remaining = (total_amount - paid_amount).max(0.0);
+    if input.amount > remaining + 0.01 {
+        return Err(format!(
+            "Сумма ({:.2}) больше остатка долга по заказу ({:.2})",
+            input.amount, remaining
+        ));
     }
 
     // Check client balance
@@ -452,7 +466,7 @@ pub fn list_client_balance_history(
                     bt.order_id, o.number, bt.payment_method, bt.account_id, bt.notes, bt.created_at
              FROM client_balance_transactions bt
              LEFT JOIN orders o ON o.id = bt.order_id
-             WHERE bt.client_id = ?1
+             WHERE bt.client_id = ?1 AND bt.voided_at IS NULL
              ORDER BY bt.created_at DESC",
         )
         .map_err(|e| e.to_string())?;

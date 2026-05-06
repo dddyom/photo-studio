@@ -3,7 +3,6 @@ import { FinanceDashboard } from "./FinanceDashboard";
 import { TransactionJournal } from "./TransactionJournal";
 import { SupplierDebts } from "./SupplierDebts";
 import { PartnerSettlements } from "./PartnerSettlements";
-import { ClosingPeriods } from "./ClosingPeriods";
 import { ClientBalancesPage } from "./ClientBalancesPage";
 
 export function FinanceRouter() {
@@ -13,7 +12,6 @@ export function FinanceRouter() {
       <Route path="transactions" element={<TransactionJournal />} />
       <Route path="debts" element={<SupplierDebts />} />
       <Route path="partners" element={<PartnerSettlements />} />
-      <Route path="closing" element={<ClosingPeriods />} />
       <Route path="client-balances" element={<ClientBalancesPage />} />
       <Route path="*" element={<Navigate to="/finance" replace />} />
     </Routes>

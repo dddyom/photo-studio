@@ -6,7 +6,6 @@ const TABS = [
   { to: "/finance/debts", label: "Долги поставщикам" },
   { to: "/finance/client-balances", label: "Авансы клиентов" },
   { to: "/finance/partners", label: "Расчёты с партнёрами" },
-  { to: "/finance/closing", label: "Закрытие периода" },
 ];
 
 export function FinanceNav() {
