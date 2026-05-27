@@ -175,7 +175,7 @@ function ItemCard({ item }: { item: OrderItem }) {
         </div>
       )}
       {item.note && (
-        <div style={{ marginTop: 4, fontSize: 11, color: "#555", fontStyle: "italic" }}>
+        <div style={{ marginTop: 6, fontSize: 12, color: "#222", padding: "4px 8px", borderLeft: "3px solid #9ca3af", background: "#f3f4f6", whiteSpace: "pre-wrap" as const }}>
           {item.note}
         </div>
       )}

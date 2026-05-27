@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
 import {
@@ -355,7 +355,17 @@ function OrderDetail({
         <div>
           <h2 className="text-xl font-semibold">Заказ {order.number}</h2>
           <p className="text-gray-500 text-sm mt-0.5">
-            {order.client_name} &middot; {formatDate(order.created_at)}
+            {order.client_name ? (
+              <Link
+                to={`/clients/${order.client_id}`}
+                className="text-blue-600 hover:text-blue-700"
+              >
+                {order.client_name}
+              </Link>
+            ) : (
+              "Без клиента"
+            )}
+            {" "}&middot; {formatDate(order.created_at)}
             {order.due_date && <span> &middot; Готовность: {formatDate(order.due_date)}</span>}
           </p>
         </div>
@@ -824,10 +834,15 @@ function ItemRow({
             <button onClick={saveNote} className="text-xs text-blue-600 hover:text-blue-700">OK</button>
             <button onClick={() => { setEditingNote(false); setNoteText(item.note ?? ""); }} className="text-xs text-gray-400">Отм.</button>
           </div>
+        ) : item.note ? (
+          <p className="text-xs text-gray-800 mt-1.5 cursor-pointer bg-gray-100 border-l-2 border-gray-400 px-2 py-1 rounded-r hover:bg-gray-200 whitespace-pre-wrap"
+            onClick={(e) => { e.stopPropagation(); setEditingNote(true); }}>
+            {item.note}
+          </p>
         ) : (
           <p className="text-xs text-gray-400 mt-1 cursor-pointer hover:text-gray-600"
             onClick={(e) => { e.stopPropagation(); setEditingNote(true); }}>
-            {item.note || "+ комментарий"}
+            + комментарий
           </p>
         )
       )}

@@ -61,6 +61,11 @@ pub struct VoidTransactionInput {
     /// is then reset to 'open' and its profit_accrual entries deleted, so the
     /// stale prior calculation doesn't linger.
     pub force: Option<bool>,
+    /// When true, allow void of an order_payment_in whose surplus was already
+    /// spent from the client balance — cascade-void the dependent
+    /// order_payment OUT entries (newest first) until the rollback no longer
+    /// drives the balance negative.
+    pub cascade_balance: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1909,6 +1914,7 @@ pub fn void_transaction(
         input.transaction_id,
         &input.reason,
         input.force.unwrap_or(false),
+        input.cascade_balance.unwrap_or(false),
     );
     if result.is_ok() {
         tx.commit().map_err(|e| e.to_string())?;
@@ -1916,11 +1922,15 @@ pub fn void_transaction(
     result
 }
 
-fn void_transaction_body(
+/// Core void flow operating on a raw connection (no Tauri State).
+/// Exposed so integration tests can exercise the cascade logic without a
+/// running app harness; the public tauri command wraps this in a transaction.
+pub fn void_transaction_body(
     conn: &Connection,
     transaction_id: i64,
     reason: &str,
     force: bool,
+    cascade_balance: bool,
 ) -> Result<FinanceTransaction, String> {
     let reason = reason.trim();
     if reason.is_empty() {
@@ -1935,7 +1945,7 @@ fn void_transaction_body(
         ensure_period_open(conn, &ft.transaction_date)?;
     }
 
-    apply_void_effects(conn, &ft)?;
+    apply_void_effects(conn, &ft, cascade_balance)?;
 
     conn.execute(
         "UPDATE finance_transactions
@@ -1983,7 +1993,7 @@ fn restore_transaction_body(
         ensure_period_open(conn, &ft.transaction_date)?;
     }
 
-    apply_restore_effects(conn, &ft)?;
+    apply_restore_effects(conn, &ft, false)?;
 
     conn.execute(
         "UPDATE finance_transactions
@@ -2037,16 +2047,19 @@ fn reopen_closed_period(conn: &Connection, transaction_date: &str) -> Result<(),
 
 // Reverses the materialized side-effects of a transaction.
 // `restore` is symmetric (apply the same changes the original register did).
-fn apply_void_effects(conn: &Connection, ft: &RawFt) -> Result<(), String> {
-    apply_effects(conn, ft, -1.0)
+// `cascade_balance` is only meaningful for void of order_payment_in: it permits
+// rolling back dependent pay-from-balance entries when the surplus has already
+// been spent.
+fn apply_void_effects(conn: &Connection, ft: &RawFt, cascade_balance: bool) -> Result<(), String> {
+    apply_effects(conn, ft, -1.0, cascade_balance)
 }
 
-fn apply_restore_effects(conn: &Connection, ft: &RawFt) -> Result<(), String> {
-    apply_effects(conn, ft, 1.0)
+fn apply_restore_effects(conn: &Connection, ft: &RawFt, cascade_balance: bool) -> Result<(), String> {
+    apply_effects(conn, ft, 1.0, cascade_balance)
 }
 
 // sign = +1 applies the original effect (restore), -1 reverses it (void).
-fn apply_effects(conn: &Connection, ft: &RawFt, sign: f64) -> Result<(), String> {
+fn apply_effects(conn: &Connection, ft: &RawFt, sign: f64, cascade_balance: bool) -> Result<(), String> {
     match ft.transaction_type.as_str() {
         "other_income_in" => {
             let acc = ft.account_id.ok_or("Нет счёта у операции")?;
@@ -2155,6 +2168,21 @@ fn apply_effects(conn: &Connection, ft: &RawFt, sign: f64) -> Result<(), String>
                      Создайте корректирующую операцию вручную."
                         .to_string()
                 })?;
+
+                if sign < 0.0 {
+                    // Void path: clients.balance must still hold at least the
+                    // surplus we're about to roll back. If part of the surplus
+                    // has been spent via pay_order_from_balance, that money
+                    // isn't sitting on the balance anymore — undoing it would
+                    // drive the balance negative and leave the dependent
+                    // orders falsely marked paid.
+                    rollback_dependent_balance_spending(
+                        conn,
+                        client_id,
+                        surplus,
+                        cascade_balance,
+                    )?;
+                }
 
                 adjust_client_balance(conn, client_id, sign * surplus)?;
                 set_voided(
@@ -2279,6 +2307,134 @@ fn apply_effects(conn: &Connection, ft: &RawFt, sign: f64) -> Result<(), String>
             return Err(format!("Тип операции '{other}' пока не поддерживает отмену"));
         }
     }
+    Ok(())
+}
+
+/// Ensure clients.balance can absorb a `-surplus` rollback without going
+/// negative. If the balance is already short by `deficit = surplus - balance`,
+/// the surplus was partially spent through pay_order_from_balance after it was
+/// recorded. Without `cascade` — refuse with a descriptive error pointing at
+/// the dependent orders. With `cascade` — void those order_payment OUT entries
+/// (newest first) until the deficit is covered, reverting each affected
+/// order's paid_amount and payment_status.
+fn rollback_dependent_balance_spending(
+    conn: &Connection,
+    client_id: i64,
+    surplus: f64,
+    cascade: bool,
+) -> Result<(), String> {
+    let current_balance: f64 = conn
+        .query_row(
+            "SELECT balance FROM clients WHERE id = ?1",
+            rusqlite::params![client_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let deficit = surplus - current_balance;
+    if deficit <= 0.01 {
+        return Ok(());
+    }
+
+    // Candidates to undo: non-voided OUT entries on this client of type
+    // order_payment (newest first — most recent spending unwinds first).
+    let mut stmt = conn
+        .prepare(
+            "SELECT cbt.id, cbt.order_id, cbt.amount, o.number
+             FROM client_balance_transactions cbt
+             LEFT JOIN orders o ON o.id = cbt.order_id
+             WHERE cbt.client_id = ?1
+               AND cbt.direction = 'out'
+               AND cbt.transaction_type = 'order_payment'
+               AND cbt.voided_at IS NULL
+             ORDER BY cbt.created_at DESC, cbt.id DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let candidates: Vec<(i64, Option<i64>, f64, Option<String>)> = stmt
+        .query_map(rusqlite::params![client_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    if !cascade {
+        // Build a minimal list of orders that would cover the deficit, so the
+        // operator knows exactly which oплаты to undo (or to confirm a cascade).
+        let mut sum = 0.0;
+        let mut labels: Vec<String> = Vec::new();
+        for (_, _, amt, num) in &candidates {
+            sum += amt;
+            let label = num
+                .clone()
+                .unwrap_or_else(|| "—".to_string());
+            labels.push(format!("{label} ({amt:.2} ₸)"));
+            if sum >= deficit {
+                break;
+            }
+        }
+        let orders_line = if labels.is_empty() {
+            "(оплаты с баланса не найдены — расхождение в данных)".to_string()
+        } else {
+            labels.join(", ")
+        };
+        return Err(format!(
+            "Невозможно отменить: излишек {surplus:.2} ₸ уже частично потрачен \
+             с баланса клиента (нужно вернуть {deficit:.2} ₸). \
+             Сначала отмените оплаты заказов с баланса: {orders_line}. \
+             Либо подтвердите каскадную отмену — система откатит эти оплаты автоматически."
+        ));
+    }
+
+    // Cascade path: void OUT entries newest-first until the freed amount
+    // covers the deficit. Each cascade-voided entry restores its share of the
+    // client balance and reverses the paid_amount on the originating order.
+    let mut freed = 0.0;
+    for (cbt_id, order_id_opt, amt, _) in candidates {
+        if freed >= deficit - 0.01 {
+            break;
+        }
+        let order_id = order_id_opt.ok_or_else(|| {
+            format!("Запись баланса #{cbt_id} без заказа — каскадная отмена невозможна")
+        })?;
+
+        conn.execute(
+            "UPDATE client_balance_transactions
+             SET voided_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![cbt_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.execute(
+            "UPDATE orders
+             SET paid_amount = paid_amount - ?1, updated_at = datetime('now')
+             WHERE id = ?2",
+            rusqlite::params![amt, order_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        crate::commands::orders::recompute_payment_status(conn, order_id)?;
+
+        adjust_client_balance(conn, client_id, amt)?;
+        freed += amt;
+    }
+
+    if freed + 0.01 < deficit {
+        return Err(format!(
+            "Каскадная отмена не может покрыть дефицит: освобождено {freed:.2} ₸ \
+             из {deficit:.2} ₸. На балансе клиента есть списания, не связанные \
+             с оплатами заказов (например, withdraw) — отмените их вручную."
+        ));
+    }
+
     Ok(())
 }
 

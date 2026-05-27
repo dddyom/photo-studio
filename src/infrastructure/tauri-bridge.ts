@@ -696,6 +696,7 @@ export const catalogs = {
   companyAccounts: () => invoke<CatalogItem[]>("list_company_accounts"),
   popularPrintFormats: () => invoke<{ name: string; count: number }[]>("popular_print_formats"),
   popularBookFormats: () => invoke<{ name: string; count: number }[]>("popular_book_formats"),
+  popularPrintCategories: () => invoke<{ name: string; count: number }[]>("popular_print_categories"),
   // All (for admin)
   allBookFormats: () => invoke<CatalogItem[]>("list_all_book_formats"),
   allPrintFormats: () => invoke<CatalogItem[]>("list_all_print_formats"),
@@ -859,6 +860,66 @@ export const clientBalance = {
     invoke<ClientWithBalance[]>("list_clients_with_balance"),
 };
 
+// ── Client card types & commands ────────────────────────────────────
+
+export interface ClientCardSummary {
+  orders_total: number;
+  orders_active: number;
+  orders_cancelled: number;
+  revenue: number;
+  avg_check: number;
+  current_debt: number;
+  last_order_at: string | null;
+}
+
+export interface ClientPaymentItem {
+  id: number;
+  order_id: number;
+  order_number: string;
+  amount: number;
+  payment_method: string;
+  account_id: number;
+  notes: string | null;
+  paid_at: string;
+}
+
+export interface ClientDeliveryItem {
+  id: number;
+  order_id: number;
+  order_number: string;
+  delivered_by: string | null;
+  notes: string | null;
+  delivered_at: string;
+}
+
+export interface ClientNote {
+  id: number;
+  client_id: number;
+  text: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const clientCard = {
+  summary: (clientId: number) =>
+    invoke<ClientCardSummary>("get_client_card_summary", { clientId }),
+  payments: (clientId: number) =>
+    invoke<ClientPaymentItem[]>("list_client_payments", { clientId }),
+  deliveries: (clientId: number) =>
+    invoke<ClientDeliveryItem[]>("list_client_deliveries", { clientId }),
+  notes: {
+    list: (clientId: number) =>
+      invoke<ClientNote[]>("list_client_notes", { clientId }),
+    create: (clientId: number, text: string) =>
+      invoke<ClientNote>("create_client_note", {
+        input: { client_id: clientId, text },
+      }),
+    update: (id: number, text: string) =>
+      invoke<ClientNote>("update_client_note", { id, text }),
+    delete: (id: number) => invoke<void>("delete_client_note", { id }),
+  },
+};
+
 // ── Finance commands ────────────────────────────────────────────────
 
 export const finance = {
@@ -974,9 +1035,14 @@ export const finance = {
 
   getSummary: () => invoke<FinanceSummary>("get_finance_summary"),
 
-  voidTransaction: (transaction_id: number, reason: string, force = false) =>
+  voidTransaction: (
+    transaction_id: number,
+    reason: string,
+    force = false,
+    cascade_balance = false,
+  ) =>
     invoke<FinanceTransaction>("void_transaction", {
-      input: { transaction_id, reason, force },
+      input: { transaction_id, reason, force, cascade_balance },
     }),
 
   restoreTransaction: (transaction_id: number, force = false) =>

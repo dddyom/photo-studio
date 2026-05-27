@@ -684,6 +684,19 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
 
         DROP TABLE _v21_overpay_fix;
     "),
+
+    // ── v22: Client notes (free-form communication log) ─────────────────
+    (22, "client notes for communication log", "
+        CREATE TABLE client_notes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id  INTEGER NOT NULL REFERENCES clients(id),
+            text       TEXT    NOT NULL,
+            created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_client_notes_client ON client_notes(client_id);
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

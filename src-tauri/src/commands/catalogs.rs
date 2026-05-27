@@ -1128,6 +1128,30 @@ pub fn popular_print_formats(db: State<DbState>) -> Result<Vec<FormatPopularity>
     Ok(rows)
 }
 
+/// Returns print category codes ordered by usage count (descending).
+#[tauri::command]
+pub fn popular_print_categories(db: State<DbState>) -> Result<Vec<FormatPopularity>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT oip.category AS name, COUNT(oip.id) AS cnt
+             FROM order_item_prints oip
+             JOIN order_items oi ON oi.id = oip.order_item_id
+             WHERE oi.is_cancelled = 0 AND oip.category IS NOT NULL AND oip.category != ''
+             GROUP BY oip.category
+             ORDER BY cnt DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(FormatPopularity { name: row.get(0)?, count: row.get(1)? })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 /// Returns book format names ordered by usage count (descending).
 #[tauri::command]
 pub fn popular_book_formats(db: State<DbState>) -> Result<Vec<FormatPopularity>, String> {

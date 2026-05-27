@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
@@ -193,7 +194,9 @@ function ClientRow({
   return (
     <tr className={`border-b border-gray-100 last:border-0 ${c.is_archived ? "opacity-50" : ""}`}>
       <td className="px-3 py-2.5">
-        {c.name}
+        <Link to={`/clients/${c.id}`} className="text-blue-600 hover:text-blue-700">
+          {c.name}
+        </Link>
         {c.is_archived && <span className="ml-2 text-xs text-gray-400">(архив)</span>}
       </td>
       <td className="px-3 py-2.5">{c.phone ?? "—"}</td>
@@ -229,6 +232,12 @@ function ClientRow({
           </>
         ) : (
           <>
+            <Link
+              to={`/clients/${c.id}`}
+              className="text-xs text-blue-600 hover:text-blue-700 mr-3"
+            >
+              Карточка
+            </Link>
             <button
               onClick={onBalance}
               className="text-xs text-blue-600 hover:text-blue-700 mr-3"

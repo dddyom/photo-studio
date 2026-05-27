@@ -514,6 +514,20 @@ function PrintAddForm({
   const { data: wfMaterials } = useTauriCommand(catalogs.wideFormatMaterials);
   const { data: laminationTypes } = useTauriCommand(catalogs.laminationTypes);
   const { data: popularFormats } = useTauriCommand(catalogs.popularPrintFormats);
+  const { data: popularCategories } = useTauriCommand(catalogs.popularPrintCategories);
+
+  const sortedCategories = useMemo(() => {
+    if (!printCategories) return [];
+    if (!popularCategories || popularCategories.length === 0) return printCategories;
+    const order = new Map<string, number>();
+    popularCategories.forEach((p, i) => order.set(p.name, i));
+    return [...printCategories].sort((a, b) => {
+      const ra = order.get(a.code) ?? Number.MAX_SAFE_INTEGER;
+      const rb = order.get(b.code) ?? Number.MAX_SAFE_INTEGER;
+      if (ra !== rb) return ra - rb;
+      return a.sort_order - b.sort_order;
+    });
+  }, [printCategories, popularCategories]);
 
   const [category, setCategory] = useState("");
   const [formatId, setFormatId] = useState<number | "">("");
@@ -526,7 +540,7 @@ function PrintAddForm({
   const [submitting, setSubmitting] = useState(false);
   const [prices, setPrices] = useState<Map<string, number>>(new Map());
 
-  if (!category && printCategories?.length) setCategory(printCategories[0].code);
+  if (!category && sortedCategories.length) setCategory(sortedCategories[0].code);
 
   const catInfo = printCategories?.find((c) => c.code === category);
   const fieldType = catInfo?.field_type ?? "format";
@@ -616,7 +630,7 @@ function PrintAddForm({
       <div>
         <label className="block text-sm font-medium mb-1">Категория *</label>
         <select value={category} onChange={(e) => { setCategory(e.target.value); setFormatId(""); setWideFormatMaterial(""); setLaminationType(""); setPrices(new Map()); }} className={INPUT}>
-          {(printCategories ?? []).map((c) => (
+          {sortedCategories.map((c) => (
             <option key={c.code} value={c.code}>{c.name}</option>
           ))}
         </select>

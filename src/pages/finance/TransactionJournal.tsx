@@ -32,6 +32,10 @@ function isClosedPeriodError(raw: string): boolean {
   return msg.includes("Период") && msg.includes("закрыт");
 }
 
+function isBalanceCascadeError(raw: string): boolean {
+  return String(raw).includes("каскадную отмену");
+}
+
 // Append a hint to common backend errors so the customer knows the next step.
 function explainVoidError(raw: string): string {
   const msg = String(raw);
@@ -93,28 +97,44 @@ export function TransactionJournal() {
   const handleVoid = async (id: number) => {
     const reason = window.prompt("Причина отмены:");
     if (!reason || !reason.trim()) return;
-    try {
-      await finance.voidTransaction(id, reason.trim());
-      toast.success("Операция отменена");
-      refetch();
-    } catch (err) {
-      const msg = String(err);
-      if (isClosedPeriodError(msg)) {
-        const ok = window.confirm(
-          `${msg}\n\nЕсли продолжить — период будет открыт заново и расчёт прибыли удалён. Партнёрские начисления (profit_accrual) исчезнут, выплаты останутся. После исправлений нужно закрыть период повторно.\n\nПродолжить?`
-        );
-        if (!ok) return;
-        try {
-          await finance.voidTransaction(id, reason.trim(), true);
-          toast.success("Операция отменена. Период открыт — закройте его заново для пересчёта прибыли.", { duration: 7000 });
-          refetch();
-        } catch (err2) {
-          toast.error(explainVoidError(String(err2)), { duration: 7000 });
+    const trimmed = reason.trim();
+
+    // Retry helper so we can layer two distinct confirmations (closed period
+    // and balance-spending cascade) without duplicating the success/failure
+    // boilerplate.
+    const attempt = async (force: boolean, cascade: boolean): Promise<void> => {
+      try {
+        await finance.voidTransaction(id, trimmed, force, cascade);
+        const note = force
+          ? "Операция отменена. Период открыт — закройте его заново для пересчёта прибыли."
+          : cascade
+            ? "Операция отменена. Связанные оплаты с баланса откатились."
+            : "Операция отменена";
+        toast.success(note, force || cascade ? { duration: 7000 } : undefined);
+        refetch();
+      } catch (err) {
+        const msg = String(err);
+        if (!force && isClosedPeriodError(msg)) {
+          const ok = window.confirm(
+            `${msg}\n\nЕсли продолжить — период будет открыт заново и расчёт прибыли удалён. Партнёрские начисления (profit_accrual) исчезнут, выплаты останутся. После исправлений нужно закрыть период повторно.\n\nПродолжить?`
+          );
+          if (!ok) return;
+          await attempt(true, cascade);
+          return;
         }
-        return;
+        if (!cascade && isBalanceCascadeError(msg)) {
+          const ok = window.confirm(
+            `${msg}\n\nПродолжить с каскадной отменой? Перечисленные оплаты будут отменены, а заказы вернутся в статус «не оплачен».`
+          );
+          if (!ok) return;
+          await attempt(force, true);
+          return;
+        }
+        toast.error(explainVoidError(msg), { duration: 7000 });
       }
-      toast.error(explainVoidError(msg), { duration: 7000 });
-    }
+    };
+
+    await attempt(false, false);
   };
 
   const handleRestore = async (id: number) => {

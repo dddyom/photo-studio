@@ -3,6 +3,7 @@ import { Toaster } from "react-hot-toast";
 import { AppShell } from "./AppShell";
 import { OrdersPage } from "@/pages/OrdersPage";
 import { ClientsPage } from "@/pages/ClientsPage";
+import { ClientCardPage } from "@/pages/clients/ClientCardPage";
 import { PricingPage } from "@/pages/PricingPage";
 import { CatalogsPage } from "@/pages/CatalogsPage";
 import { FinanceRouter } from "@/pages/finance/FinanceRouter";
@@ -27,6 +28,7 @@ export function App() {
           <Route path="/orders/:id" element={<OrdersPage />} />
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/clients" element={<ClientsPage />} />
+          <Route path="/clients/:id" element={<ClientCardPage />} />
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/pricing/help" element={<PricingHelpPage />} />
           <Route path="/catalogs" element={<CatalogsPage />} />

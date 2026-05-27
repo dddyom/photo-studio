@@ -1,5 +1,5 @@
-mod commands;
-mod db;
+pub mod commands;
+pub mod db;
 
 use tauri::Manager;
 
@@ -93,6 +93,7 @@ pub fn run() {
             commands::catalogs::list_company_accounts,
             commands::catalogs::popular_print_formats,
             commands::catalogs::popular_book_formats,
+            commands::catalogs::popular_print_categories,
             // Catalogs v10: dynamic pricing options
             commands::catalogs::list_print_categories,
             commands::catalogs::list_all_print_categories,
@@ -166,6 +167,14 @@ pub fn run() {
             commands::client_balance::get_client_balance_amount,
             commands::client_balance::list_client_balance_history,
             commands::client_balance::list_clients_with_balance,
+            // Client card
+            commands::client_card::get_client_card_summary,
+            commands::client_card::list_client_payments,
+            commands::client_card::list_client_deliveries,
+            commands::client_card::list_client_notes,
+            commands::client_card::create_client_note,
+            commands::client_card::update_client_note,
+            commands::client_card::delete_client_note,
             // Production
             commands::production::advance_production_step,
             commands::production::list_production_queue,

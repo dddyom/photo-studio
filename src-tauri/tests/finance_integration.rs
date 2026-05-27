@@ -282,6 +282,43 @@ fn create_order_with_payment(conn: &Connection, amount: f64) -> i64 {
     order_id
 }
 
+/// Extends `setup_db` with the v19/v20 columns needed for client balance
+/// tests: balance column on clients, client_balance_transactions table, and
+/// voided_at / surplus_to_balance / order_payment_id additions across payments
+/// and finance_transactions.
+fn setup_db_with_balance() -> Connection {
+    let conn = setup_db();
+    conn.execute_batch(
+        "ALTER TABLE clients ADD COLUMN balance REAL NOT NULL DEFAULT 0;
+
+         CREATE TABLE client_balance_transactions (
+             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+             client_id       INTEGER NOT NULL REFERENCES clients(id),
+             amount          REAL    NOT NULL,
+             direction       TEXT    NOT NULL CHECK (direction IN ('in','out')),
+             transaction_type TEXT   NOT NULL CHECK (transaction_type IN (
+                 'deposit','withdraw','order_payment','order_surplus'
+             )),
+             order_id        INTEGER REFERENCES orders(id),
+             payment_method  TEXT,
+             account_id      INTEGER REFERENCES company_accounts(id),
+             notes           TEXT,
+             created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+             voided_at       TEXT,
+             order_payment_id INTEGER REFERENCES order_payments(id)
+         );
+
+         ALTER TABLE finance_transactions ADD COLUMN voided_at TEXT;
+         ALTER TABLE finance_transactions ADD COLUMN voided_reason TEXT;
+         ALTER TABLE partner_settlement_entries ADD COLUMN voided_at TEXT;
+         ALTER TABLE order_payments ADD COLUMN voided_at TEXT;
+         ALTER TABLE order_payments ADD COLUMN surplus_to_balance REAL NOT NULL DEFAULT 0;
+         ALTER TABLE order_refunds ADD COLUMN voided_at TEXT;",
+    )
+    .unwrap();
+    conn
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
@@ -1131,5 +1168,273 @@ mod full_scenario_tests {
             rusqlite::params![p1], |r| r.get(0),
         ).unwrap();
         assert_eq!(accrual, -15000.0);
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Void of order_payment_in with surplus already spent from client balance
+// ───────────────────────────────────────────────────────────────────────
+mod void_cascade_tests {
+    use super::*;
+    use app_lib::commands::finance::void_transaction_body;
+
+    /// Build the bug scenario:
+    /// - Order A (75_090 ₸) gets paid 400_000 ₸ cash → surplus 324_910 ₸ to balance
+    /// - Order B (26_880 ₸) is then paid from that balance
+    /// Returns (order_a_id, order_b_id, source_finance_tx_id).
+    fn seed_surplus_then_spent(conn: &Connection) -> (i64, i64, i64) {
+        let client_id = get_id(conn, "SELECT id FROM clients LIMIT 1");
+        let acc_id = cash_id(conn);
+
+        // Order A — 75 090 ₸
+        conn.execute(
+            "INSERT INTO orders (number, client_id, production_status, total_amount)
+             VALUES ('2605-051', ?1, 'confirmed', 75090)",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        let order_a = conn.last_insert_rowid();
+
+        // Order B — 26 880 ₸
+        conn.execute(
+            "INSERT INTO orders (number, client_id, production_status, total_amount)
+             VALUES ('2605-027', ?1, 'confirmed', 26880)",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        let order_b = conn.last_insert_rowid();
+
+        // Finance: 400 000 ₸ cash into the company on order A's date
+        conn.execute(
+            "INSERT INTO finance_transactions
+               (transaction_type, amount, direction, account_id, order_id, description, transaction_date)
+             VALUES ('order_payment_in', 400000, 'in', ?1, ?2, 'Оплата 2605-051', '2026-05-14')",
+            rusqlite::params![acc_id, order_a],
+        )
+        .unwrap();
+        let ft_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE company_accounts SET balance = balance + 400000 WHERE id = ?1",
+            rusqlite::params![acc_id],
+        )
+        .unwrap();
+
+        // order_payments row: order_amount = 75 090, surplus = 324 910
+        conn.execute(
+            "INSERT INTO order_payments
+               (order_id, amount, payment_method, account_id, finance_transaction_id, surplus_to_balance)
+             VALUES (?1, 400000, 'cash', ?2, ?3, 324910)",
+            rusqlite::params![order_a, acc_id, ft_id],
+        )
+        .unwrap();
+        let payment_id = conn.last_insert_rowid();
+
+        // order A: paid_amount = 75 090, status paid
+        conn.execute(
+            "UPDATE orders SET paid_amount = 75090, payment_status = 'paid' WHERE id = ?1",
+            rusqlite::params![order_a],
+        )
+        .unwrap();
+
+        // Surplus → client balance (deposit + balance row linked to payment)
+        conn.execute(
+            "UPDATE clients SET balance = balance + 324910 WHERE id = ?1",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions
+               (client_id, amount, direction, transaction_type, order_id, order_payment_id, notes)
+             VALUES (?1, 324910, 'in', 'order_surplus', ?2, ?3, 'Излишек по оплате заказа')",
+            rusqlite::params![client_id, order_a, payment_id],
+        )
+        .unwrap();
+
+        // Spend 26 880 from balance → order B paid
+        conn.execute(
+            "UPDATE clients SET balance = balance - 26880 WHERE id = ?1",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE orders SET paid_amount = 26880, payment_status = 'paid' WHERE id = ?1",
+            rusqlite::params![order_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions
+               (client_id, amount, direction, transaction_type, order_id)
+             VALUES (?1, 26880, 'out', 'order_payment', ?2)",
+            rusqlite::params![client_id, order_b],
+        )
+        .unwrap();
+
+        (order_a, order_b, ft_id)
+    }
+
+    #[test]
+    fn void_without_cascade_blocks_when_surplus_partially_spent() {
+        let conn = setup_db_with_balance();
+        let (_, order_b, ft_id) = seed_surplus_then_spent(&conn);
+
+        let err = void_transaction_body(&conn, ft_id, "тест", false, false)
+            .expect_err("should refuse when balance was already spent");
+        assert!(
+            err.contains("каскадную отмену"),
+            "error must hint at cascade option, got: {err}"
+        );
+        assert!(err.contains("2605-027"), "error must list dependent order, got: {err}");
+
+        // Nothing changed — order B still marked paid, balance still 298_030.
+        let cb: f64 = conn
+            .query_row(
+                "SELECT balance FROM clients WHERE id =
+                   (SELECT client_id FROM orders WHERE id = ?1)",
+                rusqlite::params![order_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((cb - 298030.0).abs() < 0.01, "balance untouched, got {cb}");
+        let order_b_paid: f64 = conn
+            .query_row(
+                "SELECT paid_amount FROM orders WHERE id = ?1",
+                rusqlite::params![order_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(order_b_paid, 26880.0);
+    }
+
+    #[test]
+    fn void_with_cascade_rolls_back_balance_spending() {
+        let conn = setup_db_with_balance();
+        let (order_a, order_b, ft_id) = seed_surplus_then_spent(&conn);
+
+        void_transaction_body(&conn, ft_id, "тест каскада", false, true)
+            .expect("cascade void should succeed");
+
+        // Order A — paid_amount reset, status unpaid.
+        let (a_paid, a_status): (f64, String) = conn
+            .query_row(
+                "SELECT paid_amount, payment_status FROM orders WHERE id = ?1",
+                rusqlite::params![order_a],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(a_paid, 0.0);
+        assert_eq!(a_status, "unpaid");
+
+        // Order B — also reverted, since its balance funding was cascaded.
+        let (b_paid, b_status): (f64, String) = conn
+            .query_row(
+                "SELECT paid_amount, payment_status FROM orders WHERE id = ?1",
+                rusqlite::params![order_b],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(b_paid, 0.0);
+        assert_eq!(b_status, "unpaid");
+
+        // Client balance is exactly zero — no leaks, no debt.
+        let cb: f64 = conn
+            .query_row(
+                "SELECT balance FROM clients WHERE id =
+                   (SELECT client_id FROM orders WHERE id = ?1)",
+                rusqlite::params![order_a],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cb.abs() < 0.01, "balance must zero out, got {cb}");
+
+        // Cash account fully rolled back.
+        let cash: f64 = get_f64(
+            &conn,
+            "SELECT balance FROM company_accounts WHERE account_type='cash'",
+        );
+        assert_eq!(cash, 0.0);
+
+        // Original FT and the dependent balance row are voided.
+        let ft_voided: Option<String> = conn
+            .query_row(
+                "SELECT voided_at FROM finance_transactions WHERE id = ?1",
+                rusqlite::params![ft_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(ft_voided.is_some());
+
+        let spent_voided: Option<String> = conn
+            .query_row(
+                "SELECT voided_at FROM client_balance_transactions
+                 WHERE order_id = ?1 AND transaction_type = 'order_payment'",
+                rusqlite::params![order_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(spent_voided.is_some(), "dependent spending row must be voided");
+    }
+
+    #[test]
+    fn void_without_dependent_spending_works_normally() {
+        let conn = setup_db_with_balance();
+        let client_id = get_id(&conn, "SELECT id FROM clients LIMIT 1");
+        let acc_id = cash_id(&conn);
+
+        // Order paid with surplus, but nothing spent from balance after.
+        conn.execute(
+            "INSERT INTO orders (number, client_id, production_status, total_amount)
+             VALUES ('2606-001', ?1, 'confirmed', 1000)",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        let order_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO finance_transactions
+               (transaction_type, amount, direction, account_id, order_id, transaction_date)
+             VALUES ('order_payment_in', 1500, 'in', ?1, ?2, '2026-06-01')",
+            rusqlite::params![acc_id, order_id],
+        )
+        .unwrap();
+        let ft_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE company_accounts SET balance = balance + 1500 WHERE id = ?1",
+            rusqlite::params![acc_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments
+               (order_id, amount, payment_method, account_id, finance_transaction_id, surplus_to_balance)
+             VALUES (?1, 1500, 'cash', ?2, ?3, 500)",
+            rusqlite::params![order_id, acc_id, ft_id],
+        )
+        .unwrap();
+        let payment_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE orders SET paid_amount = 1000, payment_status = 'paid' WHERE id = ?1",
+            rusqlite::params![order_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE clients SET balance = balance + 500 WHERE id = ?1",
+            rusqlite::params![client_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO client_balance_transactions
+               (client_id, amount, direction, transaction_type, order_id, order_payment_id)
+             VALUES (?1, 500, 'in', 'order_surplus', ?2, ?3)",
+            rusqlite::params![client_id, order_id, payment_id],
+        )
+        .unwrap();
+
+        // No cascade flag, no dependents — must succeed.
+        void_transaction_body(&conn, ft_id, "тест", false, false).expect("plain void must work");
+
+        let cb: f64 = get_f64(
+            &conn,
+            "SELECT balance FROM clients WHERE id = 1",
+        );
+        assert!(cb.abs() < 0.01);
     }
 }
