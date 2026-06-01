@@ -75,6 +75,9 @@ export function TransactionJournal() {
   const [filterAccountId, setFilterAccountId] = useState<number | null>(null);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Void/restore is hidden by default: it's the #1 way a confused operator turns
+  // a small mismatch into a big tangle. Surface it only when deliberately enabled.
+  const [repairMode, setRepairMode] = useState(false);
 
   const filter: ListTransactionsFilter = {
     transaction_type: filterType || null,
@@ -216,7 +219,11 @@ export function TransactionJournal() {
             Сбросить
           </button>
         )}
-        <div className="ml-auto">
+        <label className="ml-auto flex items-center gap-1.5 text-sm text-gray-500 select-none cursor-pointer" title="Показать кнопки отмены и восстановления операций. Без необходимости лучше не трогать.">
+          <input type="checkbox" checked={repairMode} onChange={(e) => setRepairMode(e.target.checked)} />
+          Режим исправлений
+        </label>
+        <div>
           <button
             onClick={async () => {
               try {
@@ -298,7 +305,9 @@ export function TransactionJournal() {
                       {tx.direction === "in" ? "+" : tx.direction === "out" ? "−" : ""}{formatMoney(tx.amount)}
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                      {voided ? (
+                      {!repairMode ? (
+                        <span className="text-gray-200">—</span>
+                      ) : voided ? (
                         <button
                           onClick={() => handleRestore(tx.id)}
                           className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded"

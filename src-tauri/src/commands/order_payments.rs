@@ -49,6 +49,9 @@ pub struct RegisterPaymentInput {
     pub payment_method: String,
     pub account_id: i64,
     pub notes: Option<String>,
+    /// Set to true to confirm a payment that looks like an accidental duplicate
+    /// (same order, amount and method entered minutes earlier).
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +108,29 @@ pub fn register_payment(
 
     if prod_status == "cancelled" {
         return Err("Нельзя принять оплату по отменённому заказу".to_string());
+    }
+
+    // Guard against an accidental duplicate: the same amount + method on this
+    // order, entered in the last 10 minutes. This is exactly how a phantom 40 000
+    // payment crept into the books. Require confirmation to proceed.
+    if !input.force.unwrap_or(false) {
+        let dup: bool = conn
+            .query_row(
+                "SELECT 1 FROM order_payments
+                 WHERE order_id = ?1 AND ABS(amount - ?2) < 0.01 AND payment_method = ?3
+                   AND voided_at IS NULL
+                   AND created_at >= datetime('now', '-10 minutes')
+                 LIMIT 1",
+                rusqlite::params![input.order_id, input.amount, input.payment_method],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if dup {
+            return Err(format!(
+                "Похоже на повтор: такой платёж ({:.0}, {}) по этому заказу уже вносили только что. Это точно ещё одна оплата? Подтвердите.",
+                input.amount, input.payment_method
+            ));
+        }
     }
 
     // Get order number for finance description
@@ -388,6 +414,45 @@ pub fn register_delivery(
         },
     )
     .map_err(|e| e.to_string())
+}
+
+/// Remove a delivery mark (e.g. it was recorded by mistake). Resets the order's
+/// delivery_status to 'not_delivered' when no deliveries remain. No money is
+/// attached to a delivery, so this is a plain undo.
+#[tauri::command]
+pub fn delete_order_delivery(db: State<DbState>, delivery_id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let order_id: i64 = conn
+        .query_row(
+            "SELECT order_id FROM order_deliveries WHERE id = ?1",
+            rusqlite::params![delivery_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Выдача не найдена".to_string())?;
+
+    conn.execute(
+        "DELETE FROM order_deliveries WHERE id = ?1",
+        rusqlite::params![delivery_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM order_deliveries WHERE order_id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let status = if remaining == 0 { "not_delivered" } else { "delivered" };
+    conn.execute(
+        "UPDATE orders SET delivery_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![status, order_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]

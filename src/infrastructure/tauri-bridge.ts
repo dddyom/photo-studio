@@ -443,6 +443,7 @@ export interface RegisterPaymentInput {
   payment_method: string;
   account_id: number;
   notes?: string | null;
+  force?: boolean;
 }
 
 export interface RegisterPaymentResult {
@@ -802,7 +803,6 @@ export const orders = {
   updateDeliveryStatus: (id: number, status: string) =>
     invoke<Order>("update_delivery_status", { id, status }),
   delete: (id: number) => invoke<void>("delete_order", { id }),
-  cancelAndDelete: (id: number) => invoke<void>("cancel_and_delete_order", { id }),
 };
 
 // ── Order item commands ──────────────────────────────────────────────
@@ -845,6 +845,8 @@ export const orderPayments = {
     invoke<OrderDelivery[]>("list_order_deliveries", { orderId }),
   registerDelivery: (input: RegisterDeliveryInput) =>
     invoke<OrderDelivery>("register_delivery", { input }),
+  deleteDelivery: (deliveryId: number) =>
+    invoke<void>("delete_order_delivery", { deliveryId }),
 };
 
 // ── Client balance commands ─────────────────────────────────────────
@@ -905,9 +907,28 @@ export interface ClientNote {
   updated_at: string;
 }
 
+export interface ClientReconciliation {
+  cash_in: number;
+  goods: number;
+  net_owed: number;
+  balance: number;
+  order_debt: number;
+  overpaid_in_orders: number;
+  is_consistent: boolean;
+  discrepancy: number;
+  payments: number;
+  refunds: number;
+  deposits: number;
+  withdrawals: number;
+}
+
 export const clientCard = {
   summary: (clientId: number) =>
     invoke<ClientCardSummary>("get_client_card_summary", { clientId }),
+  reconciliation: (clientId: number) =>
+    invoke<ClientReconciliation>("get_client_reconciliation", { clientId }),
+  exportDiagnostic: (clientId: number) =>
+    invoke<string>("export_client_diagnostic", { clientId }),
   payments: (clientId: number) =>
     invoke<ClientPaymentItem[]>("list_client_payments", { clientId }),
   deliveries: (clientId: number) =>

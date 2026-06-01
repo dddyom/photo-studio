@@ -50,6 +50,9 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
 
   const effectiveAccountId = accountId || matchingAccount?.id;
 
+  const remaining = order.debt_amount > 0 ? order.debt_amount : 0;
+  const overpay = paySource === "external" ? Math.max(0, Number(amount) - remaining) : 0;
+
   const submit = async () => {
     const amt = Number(amount);
     if (!amt || amt <= 0) {
@@ -71,20 +74,37 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
           setSubmitting(false);
           return;
         }
-        const result = await orderPayments.register({
-          order_id: order.id,
-          amount: amt,
-          payment_method: method,
-          account_id: effectiveAccountId,
-          notes: notes || null,
-        });
-        if (result.surplus_to_balance > 0.01) {
-          toast.success(
-            `Оплата ${formatMoney(amt)} ₸. На баланс клиента: ${formatMoney(result.surplus_to_balance)} ₸`,
-            { duration: 5000 }
-          );
-        } else {
-          toast.success(`Оплата ${formatMoney(amt)} ₸ зарегистрирована`);
+        const register = async (force: boolean) => {
+          const result = await orderPayments.register({
+            order_id: order.id,
+            amount: amt,
+            payment_method: method,
+            account_id: effectiveAccountId,
+            notes: notes || null,
+            force,
+          });
+          if (result.surplus_to_balance > 0.01) {
+            toast.success(
+              `Оплата ${formatMoney(amt)} ₸. На баланс клиента: ${formatMoney(result.surplus_to_balance)} ₸`,
+              { duration: 5000 }
+            );
+          } else {
+            toast.success(`Оплата ${formatMoney(amt)} ₸ зарегистрирована`);
+          }
+        };
+        try {
+          await register(false);
+        } catch (err) {
+          const msg = String(err);
+          if (msg.includes("Подтвердите")) {
+            if (!confirm(`${msg}\n\nВсё равно провести оплату?`)) {
+              setSubmitting(false);
+              return;
+            }
+            await register(true);
+          } else {
+            throw err;
+          }
         }
       }
       onDone();
@@ -194,6 +214,12 @@ export function PaymentModal({ order, onClose, onDone }: Props) {
             <label className="block text-sm font-medium mb-1">Комментарий</label>
             <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Предоплата, доплата..." className={INPUT} />
           </div>
+
+          {overpay > 0.01 && (
+            <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+              ⚠️ Сумма больше остатка по заказу. Излишек <b>{formatMoney(overpay)} ₸</b> уйдёт на баланс клиента.
+            </div>
+          )}
 
           <div className="flex gap-2 pt-2">
             <button onClick={submit} disabled={submitting} className="px-4 py-2 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors disabled:opacity-50">

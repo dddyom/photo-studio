@@ -11,6 +11,7 @@ import {
   catalogs,
   pricing,
   system,
+  finance,
   type Order,
   type OrderItem,
   type OrderListFilter,
@@ -20,6 +21,7 @@ import {
   PRODUCTION_STATUS_LABELS,
   PAYMENT_STATUS_LABELS,
   DELIVERY_STATUS_LABELS,
+  PAYMENT_METHOD_LABELS,
   ITEM_KIND_LABELS,
   PRODUCTION_STEP_LABELS,
   productionStatusColor,
@@ -383,6 +385,51 @@ function OrderDetail({
     onOrderChanged();
   };
 
+  // Void a payment straight from the order (reuses the journal's void path with
+  // the same closed-period / balance-cascade confirmations), so the operator
+  // doesn't have to hunt for it in the finance journal.
+  const handleVoidPayment = async (financeTxId: number | null) => {
+    if (!financeTxId) {
+      toast.error("У этой оплаты нет связанной операции — отмените через журнал финансов.");
+      return;
+    }
+    const reason = window.prompt("Причина отмены оплаты:");
+    if (!reason || !reason.trim()) return;
+    const r = reason.trim();
+    const attempt = async (force: boolean, cascade: boolean): Promise<void> => {
+      try {
+        await finance.voidTransaction(financeTxId, r, force, cascade);
+        toast.success("Оплата отменена");
+        refetchAll();
+      } catch (err) {
+        const msg = String(err);
+        if (!force && msg.includes("Период") && msg.includes("закрыт")) {
+          if (!window.confirm(`${msg}\n\nОткрыть период заново и продолжить?`)) return;
+          await attempt(true, cascade);
+          return;
+        }
+        if (!cascade && msg.includes("каскадную отмену")) {
+          if (!window.confirm(`${msg}\n\nПродолжить с каскадной отменой? Связанные оплаты с баланса откатятся.`)) return;
+          await attempt(force, true);
+          return;
+        }
+        toast.error(msg, { duration: 7000 });
+      }
+    };
+    await attempt(false, false);
+  };
+
+  const handleRemoveDelivery = async (deliveryId: number) => {
+    if (!window.confirm("Снять отметку выдачи? Делайте это, только если выдачи на самом деле не было.")) return;
+    try {
+      await orderPayments.deleteDelivery(deliveryId);
+      toast.success("Отметка выдачи снята");
+      refetchAll();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  };
+
   if (loading || !order) {
     return <p className="text-gray-500">Загрузка...</p>;
   }
@@ -548,9 +595,21 @@ function OrderDetail({
             ) : (
               <div className="space-y-1.5 text-sm">
                 {payments.map((p) => (
-                  <div key={p.id} className="flex justify-between py-1 border-b border-gray-50 last:border-0">
-                    <span className="text-gray-600">{formatDateTime(p.paid_at)}</span>
-                    <span className="font-mono">+{formatMoney(p.amount)} ₸</span>
+                  <div key={p.id} className="flex items-center justify-between py-1 border-b border-gray-50 last:border-0 group">
+                    <span className="text-gray-600">
+                      {formatDateTime(p.paid_at)}
+                      <span className="text-gray-400 ml-1.5 text-xs">{PAYMENT_METHOD_LABELS[p.payment_method as keyof typeof PAYMENT_METHOD_LABELS] ?? p.payment_method}</span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono">+{formatMoney(p.amount)} ₸</span>
+                      <button
+                        onClick={() => handleVoidPayment(p.finance_transaction_id)}
+                        title="Отменить эту оплату"
+                        className="text-xs text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        Отменить
+                      </button>
+                    </span>
                   </div>
                 ))}
               </div>
@@ -569,9 +628,18 @@ function OrderDetail({
             ) : (
               <div className="space-y-1.5 text-sm">
                 {deliveries.map((d) => (
-                  <div key={d.id} className="py-1 border-b border-gray-50 last:border-0">
-                    <span className="text-gray-600">{formatDateTime(d.delivered_at)}</span>
-                    {d.delivered_by && <span className="text-gray-500 ml-2">({d.delivered_by})</span>}
+                  <div key={d.id} className="flex items-center justify-between py-1 border-b border-gray-50 last:border-0 group">
+                    <span>
+                      <span className="text-gray-600">{formatDateTime(d.delivered_at)}</span>
+                      {d.delivered_by && <span className="text-gray-500 ml-2">({d.delivered_by})</span>}
+                    </span>
+                    <button
+                      onClick={() => handleRemoveDelivery(d.id)}
+                      title="Снять отметку выдачи"
+                      className="text-xs text-gray-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      Снять
+                    </button>
                   </div>
                 ))}
               </div>
@@ -756,27 +824,6 @@ function ActionBar({
     }
   };
 
-  const handleForceDelete = async () => {
-    const ok = confirm(
-      `ОТМЕНИТЬ ЗАКАЗ ${order.number} ПОЛНОСТЬЮ?\n\n` +
-      `Действие необратимо. Будут откачены и удалены:\n` +
-      `• все оплаты и возвраты — деньги вернутся на счёт;\n` +
-      `• движения по балансу клиента — вернутся на баланс;\n` +
-      `• отметки выдачи.\n` +
-      `После отката заказ будет удалён.\n\n` +
-      `Если по операциям был закрыт период — он будет переоткрыт (закройте его заново потом).\n\n` +
-      `Продолжить?`
-    );
-    if (!ok) return;
-    try {
-      await orders.cancelAndDelete(order.id);
-      toast.success("Заказ отменён полностью и удалён", { duration: 6000 });
-      onDeleted();
-    } catch (err) {
-      toast.error(String(err), { duration: 8000 });
-    }
-  };
-
   const canAddItems = ["draft", "in_work"].includes(order.production_status);
   // Drafts, cancelled orders, and empty orders (no active items) can be deleted.
   // The backend still blocks anything with a financial trace.
@@ -808,15 +855,6 @@ function ActionBar({
           className="px-3 py-1.5 text-red-700 border border-red-300 bg-white text-sm rounded-md hover:bg-red-50 transition-colors"
         >
           Удалить
-        </button>
-      )}
-      {!isDraft && (
-        <button
-          onClick={handleForceDelete}
-          title="Откатить все оплаты, движения баланса и выдачи по заказу, затем удалить его."
-          className="px-3 py-1.5 text-white bg-red-600 border border-red-600 text-sm rounded-md hover:bg-red-700 transition-colors"
-        >
-          Отменить полностью
         </button>
       )}
     </div>

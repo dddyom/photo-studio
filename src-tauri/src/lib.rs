@@ -143,7 +143,6 @@ pub fn run() {
             commands::orders::update_delivery_status,
             commands::orders::list_orders,
             commands::orders::delete_order,
-            commands::orders::cancel_and_delete_order,
             // Order items
             commands::order_items::list_order_items,
             commands::order_items::add_book_item,
@@ -162,6 +161,7 @@ pub fn run() {
             commands::order_payments::list_order_payments,
             commands::order_payments::list_order_refunds,
             commands::order_payments::list_order_deliveries,
+            commands::order_payments::delete_order_delivery,
             // Client balance
             commands::client_balance::deposit_to_client_balance,
             commands::client_balance::withdraw_from_client_balance,
@@ -171,6 +171,8 @@ pub fn run() {
             commands::client_balance::list_clients_with_balance,
             // Client card
             commands::client_card::get_client_card_summary,
+            commands::client_card::get_client_reconciliation,
+            commands::client_card::export_client_diagnostic,
             commands::client_card::list_client_payments,
             commands::client_card::list_client_deliveries,
             commands::client_card::list_client_notes,

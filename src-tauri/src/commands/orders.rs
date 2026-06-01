@@ -483,9 +483,8 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
     delete_order_rows(conn, id)
 }
 
-/// Raw cascade delete of an order and all its rows. NO guards — callers must
-/// have either passed the checks in `delete_order_body` or reversed every
-/// financial effect (see `cancel_and_delete_order_body`) before calling this.
+/// Raw cascade delete of an order and all its rows. NO guards — the caller
+/// (`delete_order_body`) must have validated there's no live financial trace.
 fn delete_order_rows(conn: &Connection, id: i64) -> Result<(), String> {
     // Per-item detail tables → items → payments/refunds/balance tx → order
     conn.execute(
@@ -519,6 +518,13 @@ fn delete_order_rows(conn: &Connection, id: i64) -> Result<(), String> {
         rusqlite::params![id],
     )
     .map_err(|e| e.to_string())?;
+    // Balance transactions reference order_payments via order_payment_id, so they
+    // must be deleted BEFORE the payments to avoid a foreign-key violation.
+    conn.execute(
+        "DELETE FROM client_balance_transactions WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM order_payments WHERE order_id = ?1",
         rusqlite::params![id],
@@ -526,11 +532,6 @@ fn delete_order_rows(conn: &Connection, id: i64) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM order_refunds WHERE order_id = ?1",
-        rusqlite::params![id],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "DELETE FROM client_balance_transactions WHERE order_id = ?1",
         rusqlite::params![id],
     )
     .map_err(|e| e.to_string())?;
@@ -546,107 +547,6 @@ fn delete_order_rows(conn: &Connection, id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-/// "Отменить заказ полностью": reverse every financial effect of an order
-/// (payments, refunds, balance movements, deliveries) using the same primitives
-/// as the finance journal, then hard-delete the order. Unlike `delete_order`,
-/// this works on orders WITH a financial trace — it undoes that trace first.
-/// Wrapped in a transaction so a mid-reversal failure rolls back cleanly.
-#[tauri::command]
-pub fn cancel_and_delete_order(db: State<DbState>, id: i64) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let result = cancel_and_delete_order_body(&conn, id);
-    if result.is_ok() {
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    result
-}
-
-fn cancel_and_delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
-    let _: i64 = conn
-        .query_row(
-            "SELECT id FROM orders WHERE id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Заказ не найден".to_string())?;
-
-    // 1. Void every non-voided finance transaction tied to this order
-    //    (order payments in, refunds out). force=true bypasses closed-period
-    //    blocks (reopening them), cascade_balance=true unwinds surplus that was
-    //    already spent from the client balance. This reverses company-account
-    //    balances and client-balance surplus through the tested void path.
-    let ft_ids: Vec<i64> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM finance_transactions
-                 WHERE order_id = ?1 AND voided_at IS NULL
-                 ORDER BY id DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let ids = stmt
-            .query_map(rusqlite::params![id], |row| row.get(0))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<i64>, _>>()
-            .map_err(|e| e.to_string())?;
-        ids
-    };
-    for ft_id in ft_ids {
-        crate::commands::finance::void_transaction_body(
-            conn,
-            ft_id,
-            "Полная отмена заказа",
-            true,
-            true,
-        )?;
-    }
-
-    // 2. Reverse any remaining non-voided client-balance movements on this order.
-    //    These are pay-from-balance entries (direction 'out', no finance tx) and
-    //    any surplus not already unwound above. 'out' returns money to balance,
-    //    'in' removes it.
-    let bal_txs: Vec<(i64, String, f64, i64)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, direction, amount, client_id
-                 FROM client_balance_transactions
-                 WHERE order_id = ?1 AND voided_at IS NULL",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        rows
-    };
-    for (cbt_id, direction, amount, client_id) in bal_txs {
-        let delta = if direction == "out" { amount } else { -amount };
-        conn.execute(
-            "UPDATE clients SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![delta, client_id],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE client_balance_transactions SET voided_at = datetime('now') WHERE id = ?1",
-            rusqlite::params![cbt_id],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    // 3. Drop delivery marks (no money attached).
-    conn.execute(
-        "DELETE FROM order_deliveries WHERE order_id = ?1",
-        rusqlite::params![id],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // 4. Everything reversed — hard-delete the order and its rows.
-    delete_order_rows(conn, id)
 }
 
 #[tauri::command]

@@ -9,6 +9,7 @@ import {
   pricing,
   orders,
   type ClientNote,
+  type ClientReconciliation,
 } from "@/infrastructure/tauri-bridge";
 import {
   formatMoney,
@@ -61,6 +62,10 @@ export function ClientCardPage() {
     () => clientBalance.history(clientId),
     [clientId],
   );
+  const { data: recon, refetch: refetchRecon } = useTauriCommand(
+    () => clientCard.reconciliation(clientId),
+    [clientId],
+  );
   const { data: programs } = useTauriCommand(pricing.listPrograms);
 
   const [showBalanceModal, setShowBalanceModal] = useState(false);
@@ -72,6 +77,7 @@ export function ClientCardPage() {
     refetchPayments();
     refetchDeliveries();
     refetchBalance();
+    refetchRecon();
   };
 
   if (!client) {
@@ -163,6 +169,8 @@ export function ClientCardPage() {
         </div>
       )}
 
+      {recon && <ReconciliationPanel recon={recon} clientId={clientId} clientName={client.name} />}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left: orders + notes */}
         <div className="lg:col-span-2 space-y-4">
@@ -215,6 +223,86 @@ function StatCard({
     <div className="bg-white border border-gray-200 rounded-md px-3 py-2.5">
       <div className="text-xs text-gray-500">{label}</div>
       <div className={`text-lg font-semibold mt-0.5 ${valueColor}`}>{value}</div>
+    </div>
+  );
+}
+
+// ── Reconciliation panel ────────────────────────────────────────────
+
+function ReconciliationPanel({
+  recon,
+  clientId,
+  clientName,
+}: {
+  recon: ClientReconciliation;
+  clientId: number;
+  clientName: string;
+}) {
+  const [exporting, setExporting] = useState(false);
+  const owes = recon.net_owed > 0.01;
+  const studioOwes = recon.net_owed < -0.01;
+  const hasProblem = !recon.is_consistent || recon.overpaid_in_orders > 0.01;
+
+  const snapshot = async () => {
+    setExporting(true);
+    try {
+      const path = await clientCard.exportDiagnostic(clientId);
+      toast.success(`Снимок сохранён:\n${path}\n\nОтправьте этот файл разработчику.`, { duration: 9000 });
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className={`mb-5 rounded-md border p-4 ${hasProblem ? "border-amber-300 bg-amber-50/60" : "border-gray-200 bg-white"}`}>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-base font-semibold flex items-center gap-2">
+          Сверка по клиенту
+          {recon.is_consistent ? (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">✓ книги сходятся</span>
+          ) : (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">✗ не сходится</span>
+          )}
+        </h3>
+        <button
+          onClick={snapshot}
+          disabled={exporting}
+          className="px-2.5 py-1 border border-gray-300 bg-white text-xs rounded hover:bg-gray-50 transition-colors disabled:opacity-50"
+        >
+          {exporting ? "..." : "📸 Снимок для разработчика"}
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
+        <div>
+          <div className="text-xs text-gray-500">
+            {studioOwes ? "Студия должна клиенту" : "Клиент должен"}
+          </div>
+          <div className={`text-2xl font-semibold font-mono ${owes ? "text-red-600" : studioOwes ? "text-green-600" : "text-gray-400"}`}>
+            {formatMoney(Math.abs(recon.net_owed))} ₸
+          </div>
+        </div>
+        <div className="text-sm text-gray-600 flex flex-wrap gap-x-5 gap-y-0.5">
+          <span>Внёс деньгами: <b className="font-mono">{formatMoney(recon.cash_in)}</b></span>
+          <span>Товара на: <b className="font-mono">{formatMoney(recon.goods)}</b></span>
+          <span>Баланс: <b className="font-mono">{formatMoney(recon.balance)}</b></span>
+          <span>Долг по заказам: <b className="font-mono">{formatMoney(recon.order_debt)}</b></span>
+        </div>
+      </div>
+
+      {hasProblem && (
+        <div className="mt-3 text-sm text-amber-800 bg-amber-100/70 rounded px-3 py-2">
+          {!recon.is_consistent ? (
+            <>⚠️ Книги не сходятся на {formatMoney(Math.abs(recon.discrepancy))} ₸. </>
+          ) : (
+            <>⚠️ В заказах застряла переплата {formatMoney(recon.overpaid_in_orders)} ₸. </>
+          )}
+          <b>Не отменяйте и не восстанавливайте операции сами</b> — так проблему сложнее найти. Нажмите «Снимок для разработчика» и отправьте файл.
+          <span className="text-amber-700"> (клиент: {clientName})</span>
+        </div>
+      )}
     </div>
   );
 }

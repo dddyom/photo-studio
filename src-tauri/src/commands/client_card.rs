@@ -51,6 +51,203 @@ pub struct ClientNote {
     pub updated_at: String,
 }
 
+/// Plain-language reconciliation of a client's money, so the operator can see
+/// "сходится / не сходится" at a glance instead of guessing from the balance.
+#[derive(Debug, Serialize)]
+pub struct ClientReconciliation {
+    /// Real money the client handed over, net: order payments + balance deposits
+    /// − refunds − balance withdrawals (all non-voided).
+    pub cash_in: f64,
+    /// Value of goods the client received (sum of non-cancelled order totals).
+    pub goods: f64,
+    /// Bottom line: goods − cash_in. Positive = client owes the studio,
+    /// negative = the studio owes the client.
+    pub net_owed: f64,
+    /// Current credit sitting on the client's balance.
+    pub balance: f64,
+    /// Outstanding debt summed across the client's non-cancelled orders.
+    pub order_debt: f64,
+    /// Money stranded in overpaid orders (paid_amount > total_amount).
+    pub overpaid_in_orders: f64,
+    /// True when the app's own books tie out (cash_in == Σpaid + balance).
+    /// False signals a broken void/restore or a manual edit — DON'T self-repair.
+    pub is_consistent: bool,
+    /// Size of the inconsistency, if any (for diagnostics).
+    pub discrepancy: f64,
+    // Breakdown for the snapshot / audit.
+    pub payments: f64,
+    pub refunds: f64,
+    pub deposits: f64,
+    pub withdrawals: f64,
+}
+
+#[tauri::command]
+pub fn get_client_reconciliation(
+    db: State<DbState>,
+    client_id: i64,
+) -> Result<ClientReconciliation, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    reconcile(&conn, client_id)
+}
+
+fn reconcile(conn: &rusqlite::Connection, client_id: i64) -> Result<ClientReconciliation, String> {
+    let (payments, refunds, deposits, withdrawals, goods, sum_paid, order_debt, overpaid, balance): (
+        f64, f64, f64, f64, f64, f64, f64, f64, f64,
+    ) = conn
+        .query_row(
+            "SELECT
+                COALESCE((SELECT SUM(p.amount) FROM order_payments p JOIN orders o ON o.id=p.order_id
+                          WHERE o.client_id=?1 AND p.voided_at IS NULL),0),
+                COALESCE((SELECT SUM(r.amount) FROM order_refunds r JOIN orders o ON o.id=r.order_id
+                          WHERE o.client_id=?1 AND r.voided_at IS NULL),0),
+                COALESCE((SELECT SUM(amount) FROM client_balance_transactions
+                          WHERE client_id=?1 AND transaction_type='deposit' AND voided_at IS NULL),0),
+                COALESCE((SELECT SUM(amount) FROM client_balance_transactions
+                          WHERE client_id=?1 AND transaction_type='withdraw' AND voided_at IS NULL),0),
+                COALESCE((SELECT SUM(total_amount) FROM orders
+                          WHERE client_id=?1 AND production_status!='cancelled'),0),
+                COALESCE((SELECT SUM(paid_amount) FROM orders WHERE client_id=?1),0),
+                COALESCE((SELECT SUM(total_amount-paid_amount) FROM orders
+                          WHERE client_id=?1 AND production_status!='cancelled'),0),
+                COALESCE((SELECT SUM(paid_amount-total_amount) FROM orders
+                          WHERE client_id=?1 AND production_status!='cancelled' AND paid_amount>total_amount),0),
+                (SELECT balance FROM clients WHERE id=?1)",
+            rusqlite::params![client_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+                ))
+            },
+        )
+        .map_err(|_| "Клиент не найден".to_string())?;
+
+    let cash_in = payments - refunds + deposits - withdrawals;
+    let net_owed = goods - cash_in;
+    let discrepancy = cash_in - (sum_paid + balance);
+
+    Ok(ClientReconciliation {
+        cash_in,
+        goods,
+        net_owed,
+        balance,
+        order_debt,
+        overpaid_in_orders: overpaid,
+        is_consistent: discrepancy.abs() < 1.0,
+        discrepancy,
+        payments,
+        refunds,
+        deposits,
+        withdrawals,
+    })
+}
+
+/// Write a human-readable diagnostic snapshot for one client to the exports
+/// folder: reconciliation + every order + recent balance/payment operations.
+/// The operator sends this file to the developer instead of poking at the data.
+#[tauri::command]
+pub fn export_client_diagnostic(db: State<DbState>, client_id: i64) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let r = reconcile(&conn, client_id)?;
+
+    let (name, phone): (String, Option<String>) = conn
+        .query_row(
+            "SELECT name, phone FROM clients WHERE id = ?1",
+            rusqlite::params![client_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "Клиент не найден".to_string())?;
+
+    let now = chrono::Local::now();
+    let mut out = String::new();
+    out.push_str("СНИМОК ПО КЛИЕНТУ ДЛЯ РАЗРАБОТЧИКА\n");
+    out.push_str(&format!("Сформирован: {}\n", now.format("%Y-%m-%d %H:%M:%S")));
+    out.push_str(&format!("Клиент: {} (id {}){}\n\n", name, client_id,
+        phone.map(|p| format!(", тел. {p}")).unwrap_or_default()));
+
+    out.push_str("СВЕРКА\n");
+    out.push_str(&format!("  Внёс деньгами (нетто):   {:>12.2}\n", r.cash_in));
+    out.push_str(&format!("    оплаты:                {:>12.2}\n", r.payments));
+    out.push_str(&format!("    возвраты:              {:>12.2}\n", r.refunds));
+    out.push_str(&format!("    пополнения баланса:    {:>12.2}\n", r.deposits));
+    out.push_str(&format!("    выводы с баланса:      {:>12.2}\n", r.withdrawals));
+    out.push_str(&format!("  Товара получил на:       {:>12.2}\n", r.goods));
+    out.push_str(&format!("  => Должен студии (нетто):{:>12.2}\n", r.net_owed));
+    out.push_str(&format!("  Баланс (кредит):         {:>12.2}\n", r.balance));
+    out.push_str(&format!("  Долг по заказам:         {:>12.2}\n", r.order_debt));
+    out.push_str(&format!("  Переплата в заказах:     {:>12.2}\n", r.overpaid_in_orders));
+    out.push_str(&format!("  Книги сходятся: {}{}\n\n",
+        if r.is_consistent { "ДА" } else { "НЕТ" },
+        if r.is_consistent { String::new() } else { format!(" (расхождение {:.2})", r.discrepancy) }));
+
+    out.push_str("ЗАКАЗЫ\n");
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT number, production_status, payment_status, delivery_status,
+                        total_amount, paid_amount, created_at
+                 FROM orders WHERE client_id = ?1 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![client_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?, row.get::<_, f64>(5)?, row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (num, prod, pay, deliv, total, paid, created) = row.map_err(|e| e.to_string())?;
+            out.push_str(&format!(
+                "  {num}  {prod}/{pay}/{deliv}  сумма {total:.0} оплачено {paid:.0} долг {:.0}  ({})\n",
+                total - paid, &created[..10.min(created.len())]
+            ));
+        }
+    }
+
+    out.push_str("\nДВИЖЕНИЯ ПО БАЛАНСУ (последние 30, вкл. отменённые)\n");
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT bt.created_at, bt.transaction_type, bt.direction, bt.amount,
+                        o.number, bt.voided_at, bt.notes
+                 FROM client_balance_transactions bt
+                 LEFT JOIN orders o ON o.id = bt.order_id
+                 WHERE bt.client_id = ?1 ORDER BY bt.created_at DESC, bt.id DESC LIMIT 30",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![client_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?, row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (created, ttype, dir, amount, num, voided, notes) = row.map_err(|e| e.to_string())?;
+            out.push_str(&format!(
+                "  {}  {ttype} {} {amount:.0}  {}{}{}\n",
+                created, if dir == "in" { "+" } else { "-" },
+                num.map(|n| format!("#{n} ")).unwrap_or_default(),
+                if voided.is_some() { "[ОТМЕНЕНО] " } else { "" },
+                notes.unwrap_or_default(),
+            ));
+        }
+    }
+
+    let dir = db.db_path.parent().unwrap_or(std::path::Path::new(".")).join("exports");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe_name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+    let path = dir.join(format!("диагностика_{}_{}.txt", safe_name, now.format("%Y-%m-%d_%H-%M-%S")));
+    std::fs::write(&path, out).map_err(|e| e.to_string())?;
+
+    Ok(path.display().to_string())
+}
+
 // ── Summary ──────────────────────────────────────────────────────────
 
 #[tauri::command]
