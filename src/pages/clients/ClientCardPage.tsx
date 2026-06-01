@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useTauriCommand } from "@/shared/hooks/useTauriCommand";
@@ -22,6 +22,7 @@ import {
   paymentStatusColor,
   deliveryStatusColor,
 } from "@/shared/orderLabels";
+import { OrderItemsList } from "@/shared/components/OrderItemsList";
 import { ClientBalanceModal } from "./ClientBalanceModal";
 
 const BALANCE_TX_TYPE_LABELS: Record<string, string> = {
@@ -146,6 +147,13 @@ export function ClientCardPage() {
             value={`${formatMoney(summary.current_debt)} ₸`}
             tone={summary.current_debt > 0.01 ? "red" : "muted"}
           />
+          {summary.overpaid_in_orders > 0.01 && (
+            <StatCard
+              label="Переплата в заказах"
+              value={`${formatMoney(summary.overpaid_in_orders)} ₸`}
+              tone="amber"
+            />
+          )}
           <StatCard
             label="Последний заказ"
             value={
@@ -190,13 +198,15 @@ function StatCard({
 }: {
   label: string;
   value: string | number;
-  tone?: "blue" | "red" | "muted";
+  tone?: "blue" | "red" | "muted" | "amber";
 }) {
   const valueColor =
     tone === "red"
       ? "text-red-600"
       : tone === "blue"
       ? "text-blue-600"
+      : tone === "amber"
+      ? "text-amber-600"
       : tone === "muted"
       ? "text-gray-400"
       : "text-gray-900";
@@ -224,8 +234,17 @@ function OrdersBlock({
     debt_amount: number;
     created_at: string;
     due_date: string | null;
+    items_count: number;
   }>;
 }) {
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const toggleExpanded = (orderId: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(orderId) ? next.delete(orderId) : next.add(orderId);
+      return next;
+    });
+
   return (
     <div className="bg-white border border-gray-200 rounded-md p-4">
       <h3 className="text-base font-semibold mb-3">Заказы ({list.length})</h3>
@@ -241,13 +260,15 @@ function OrdersBlock({
                 <th className="text-left py-1.5">Статус</th>
                 <th className="text-left py-1.5">Оплата</th>
                 <th className="text-left py-1.5">Выдача</th>
+                <th className="text-left py-1.5">Позиции</th>
                 <th className="text-right py-1.5">Сумма</th>
                 <th className="text-right py-1.5">Долг</th>
               </tr>
             </thead>
             <tbody>
               {list.map((o) => (
-                <tr key={o.id} className="border-t border-gray-100">
+                <Fragment key={o.id}>
+                <tr className="border-t border-gray-100">
                   <td className="py-1.5">
                     <Link
                       to={`/orders/${o.id}`}
@@ -292,6 +313,19 @@ function OrdersBlock({
                       ] ?? o.delivery_status}
                     </span>
                   </td>
+                  <td className="py-1.5">
+                    {o.items_count > 0 ? (
+                      <button
+                        onClick={() => toggleExpanded(o.id)}
+                        title={expanded.has(o.id) ? "Свернуть позиции" : "Показать позиции"}
+                        className="text-xs text-blue-600 hover:text-blue-700"
+                      >
+                        {o.items_count} поз. {expanded.has(o.id) ? "▴" : "▾"}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-gray-300">—</span>
+                    )}
+                  </td>
                   <td className="py-1.5 text-right font-mono">
                     {formatMoney(o.total_amount)}
                   </td>
@@ -305,6 +339,14 @@ function OrdersBlock({
                     )}
                   </td>
                 </tr>
+                {expanded.has(o.id) && (
+                  <tr className="bg-gray-50/60">
+                    <td colSpan={8} className="py-2 px-2">
+                      <OrderItemsList orderId={o.id} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

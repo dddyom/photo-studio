@@ -31,6 +31,7 @@ import {
   formatDate,
   formatDateTime,
 } from "@/shared/orderLabels";
+import { OrderItemsList } from "@/shared/components/OrderItemsList";
 import { AddItemPanel } from "./orders/components/AddItemPanel";
 import { PaymentModal } from "./orders/components/PaymentModal";
 import { DeliveryModal } from "./orders/components/DeliveryModal";
@@ -77,12 +78,24 @@ export function OrdersPage() {
   const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
   const [showCancelled, setShowCancelled] = useState(false);
   const [search, setSearch] = useState("");
+  const [clientFilter, setClientFilter] = useState<number | "">("");
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
-  const filter: OrderListFilter = showCancelled
-    ? { production_status: "cancelled" }
-    : quickFilterToApi(quickFilter);
-  const fetchOrders = useCallback(() => orders.list(filter), [quickFilter, showCancelled]);
-  const { data: orderList, loading: listLoading, refetch: refetchList } = useTauriCommand(fetchOrders, [quickFilter, showCancelled]);
+  const toggleExpanded = (orderId: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(orderId) ? next.delete(orderId) : next.add(orderId);
+      return next;
+    });
+
+  const { data: clientList } = useTauriCommand(() => clients.list(), []);
+
+  const filter: OrderListFilter = {
+    ...(showCancelled ? { production_status: "cancelled" } : quickFilterToApi(quickFilter)),
+    ...(clientFilter ? { client_id: clientFilter } : {}),
+  };
+  const fetchOrders = useCallback(() => orders.list(filter), [quickFilter, showCancelled, clientFilter]);
+  const { data: orderList, loading: listLoading, refetch: refetchList } = useTauriCommand(fetchOrders, [quickFilter, showCancelled, clientFilter]);
 
   const filtered = (orderList ?? []).filter((o) => {
     if (!search) return true;
@@ -150,6 +163,20 @@ export function OrdersPage() {
             placeholder="Поиск..."
             className="w-full px-2.5 py-1.5 border border-gray-200 rounded text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/15"
           />
+          <select
+            value={clientFilter}
+            onChange={(e) => setClientFilter(e.target.value ? Number(e.target.value) : "")}
+            className={`w-full mt-2 px-2.5 py-1.5 border rounded text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/15 ${
+              clientFilter ? "border-blue-400 bg-blue-50/40 text-gray-800" : "border-gray-200 text-gray-600"
+            }`}
+          >
+            <option value="">Все клиенты</option>
+            {(clientList ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.phone ? ` (${c.phone})` : ""}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -175,6 +202,22 @@ export function OrdersPage() {
                 <div className="text-sm text-gray-600 mb-1 truncate">
                   {o.client_name ?? "Без клиента"}
                 </div>
+                {o.items_count > 0 && (
+                  <div className="mb-1">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleExpanded(o.id); }}
+                      title={expanded.has(o.id) ? "Свернуть позиции" : "Показать позиции"}
+                      className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                      {o.items_count} поз. {expanded.has(o.id) ? "▴" : "▾"}
+                    </button>
+                  </div>
+                )}
+                {expanded.has(o.id) && (
+                  <div className="mb-1.5 pl-2 border-l-2 border-gray-200" onClick={(e) => e.stopPropagation()}>
+                    <OrderItemsList orderId={o.id} />
+                  </div>
+                )}
                 <div className="flex items-center gap-1.5">
                   <StatusBadge
                     label={PRODUCTION_STATUS_LABELS[o.production_status]}
@@ -346,7 +389,6 @@ function OrderDetail({
 
   const isDraft = order.production_status === "draft";
   const isCancelled = order.production_status === "cancelled";
-  const activeItems = (items ?? []).filter((i) => !i.is_cancelled);
 
   return (
     <div>
@@ -404,7 +446,7 @@ function OrderDetail({
                 <button onClick={() => setItemPanelMode("add")} className="text-sm text-blue-600 hover:text-blue-700">+ Добавить</button>
               )}
             </div>
-            {activeItems.length === 0 ? (
+            {(items ?? []).length === 0 ? (
               <p className="text-gray-400 text-sm py-4 text-center">Нет позиций</p>
             ) : (
               <div className="space-y-2">
@@ -418,9 +460,29 @@ function OrderDetail({
                     onEdit={() => setItemPanelMode(item)}
                     onCancel={async () => {
                       if (!confirm(`Удалить позицию "${item.description || ITEM_KIND_LABELS[item.item_kind]}"?`)) return;
-                      try {
-                        await orderItems.cancel(item.id);
+                      const doCancel = async (force: boolean) => {
+                        await orderItems.cancel(item.id, force);
                         toast.success("Позиция удалена");
+                        refetchAll();
+                      };
+                      try {
+                        await doCancel(false);
+                      } catch (err) {
+                        const msg = String(err);
+                        if (msg.includes("Подтвердите отмену")) {
+                          if (!confirm(`${msg}\n\nВсё равно отменить позицию?`)) return;
+                          try {
+                            await doCancel(true);
+                          } catch (err2) { toast.error(String(err2)); }
+                          return;
+                        }
+                        toast.error(msg);
+                      }
+                    }}
+                    onRestore={async () => {
+                      try {
+                        await orderItems.restore(item.id);
+                        toast.success("Позиция возвращена");
                         refetchAll();
                       } catch (err) { toast.error(String(err)); }
                     }}
@@ -694,8 +756,31 @@ function ActionBar({
     }
   };
 
+  const handleForceDelete = async () => {
+    const ok = confirm(
+      `ОТМЕНИТЬ ЗАКАЗ ${order.number} ПОЛНОСТЬЮ?\n\n` +
+      `Действие необратимо. Будут откачены и удалены:\n` +
+      `• все оплаты и возвраты — деньги вернутся на счёт;\n` +
+      `• движения по балансу клиента — вернутся на баланс;\n` +
+      `• отметки выдачи.\n` +
+      `После отката заказ будет удалён.\n\n` +
+      `Если по операциям был закрыт период — он будет переоткрыт (закройте его заново потом).\n\n` +
+      `Продолжить?`
+    );
+    if (!ok) return;
+    try {
+      await orders.cancelAndDelete(order.id);
+      toast.success("Заказ отменён полностью и удалён", { duration: 6000 });
+      onDeleted();
+    } catch (err) {
+      toast.error(String(err), { duration: 8000 });
+    }
+  };
+
   const canAddItems = ["draft", "in_work"].includes(order.production_status);
-  const canDelete = isDraft || isCancelled;
+  // Drafts, cancelled orders, and empty orders (no active items) can be deleted.
+  // The backend still blocks anything with a financial trace.
+  const canDelete = isDraft || isCancelled || order.items_count === 0;
 
   return (
     <div className="flex flex-wrap gap-2">
@@ -719,10 +804,19 @@ function ActionBar({
       {canDelete && (
         <button
           onClick={handleDelete}
-          title="Полное удаление. Доступно только для черновиков и отменённых заказов без оплат и активности."
+          title="Полное удаление. Доступно для черновиков, отменённых и пустых заказов без оплат и активности."
           className="px-3 py-1.5 text-red-700 border border-red-300 bg-white text-sm rounded-md hover:bg-red-50 transition-colors"
         >
           Удалить
+        </button>
+      )}
+      {!isDraft && (
+        <button
+          onClick={handleForceDelete}
+          title="Откатить все оплаты, движения баланса и выдачи по заказу, затем удалить его."
+          className="px-3 py-1.5 text-white bg-red-600 border border-red-600 text-sm rounded-md hover:bg-red-700 transition-colors"
+        >
+          Отменить полностью
         </button>
       )}
     </div>
@@ -742,7 +836,7 @@ function getNextProductionStatus(current: string): string | null {
 // ── Item row ────────────────────────────────────────────────────────
 
 function ItemRow({
-  item, isCancelled: orderCancelled, showSteps, printCategories, onEdit, onCancel, onAdvance, onRefresh, onPrint,
+  item, isCancelled: orderCancelled, showSteps, printCategories, onEdit, onCancel, onRestore, onAdvance, onRefresh, onPrint,
 }: {
   item: OrderItem;
   isCancelled: boolean;
@@ -750,6 +844,7 @@ function ItemRow({
   printCategories: PrintCategoryItem[];
   onEdit: () => void;
   onCancel: () => void;
+  onRestore: () => void;
   onAdvance: () => void;
   onRefresh: () => void;
   onPrint: () => void;
@@ -818,6 +913,10 @@ function ItemRow({
                 <button onClick={(e) => { e.stopPropagation(); onCancel(); }}
                   className="text-xs text-red-500 hover:text-red-600">Удл.</button>
               </>
+            )}
+            {item.is_cancelled && !orderCancelled && (
+              <button onClick={(e) => { e.stopPropagation(); onRestore(); }}
+                className="text-xs px-2 py-0.5 border border-gray-300 rounded text-gray-600 hover:border-green-500 hover:text-green-600 transition-colors no-underline">Вернуть</button>
             )}
           </div>
         </div>

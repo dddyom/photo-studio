@@ -143,6 +143,7 @@ pub fn run() {
             commands::orders::update_delivery_status,
             commands::orders::list_orders,
             commands::orders::delete_order,
+            commands::orders::cancel_and_delete_order,
             // Order items
             commands::order_items::list_order_items,
             commands::order_items::add_book_item,
@@ -150,6 +151,7 @@ pub fn run() {
             commands::order_items::add_service_item,
             commands::order_items::add_extra_item,
             commands::order_items::cancel_order_item,
+            commands::order_items::restore_order_item,
             commands::order_items::update_order_item_price,
             commands::order_items::update_order_item,
             commands::order_items::update_order_item_note,

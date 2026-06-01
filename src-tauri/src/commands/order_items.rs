@@ -668,7 +668,11 @@ pub fn add_extra_item(db: State<DbState>, input: AddExtraItemInput) -> Result<Or
 }
 
 #[tauri::command]
-pub fn cancel_order_item(db: State<DbState>, item_id: i64) -> Result<OrderItem, String> {
+pub fn cancel_order_item(
+    db: State<DbState>,
+    item_id: i64,
+    force: bool,
+) -> Result<OrderItem, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let item = read_order_item(&conn, item_id)?;
@@ -676,6 +680,25 @@ pub fn cancel_order_item(db: State<DbState>, item_id: i64) -> Result<OrderItem, 
 
     if status == "cancelled" {
         return Err("Заказ отменён".to_string());
+    }
+
+    // Guard: an item that's already produced, or sits on a delivered order, was
+    // almost certainly handed to the client. Cancelling it silently zeroes the
+    // charge for goods the studio actually gave out (this is exactly how order
+    // 2605-200 lost track of delivered photobooks). Require explicit confirmation.
+    if !force {
+        let delivered: bool = conn
+            .query_row(
+                "SELECT delivery_status = 'delivered' FROM orders WHERE id = ?1",
+                rusqlite::params![item.order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if item.production_step == "done" || delivered {
+            return Err(
+                "Позиция уже изготовлена или заказ выдан — отмена скроет реально переданный клиенту товар. Подтвердите отмену.".to_string(),
+            );
+        }
     }
 
     if status == "draft" {
@@ -723,6 +746,34 @@ pub fn cancel_order_item(db: State<DbState>, item_id: i64) -> Result<OrderItem, 
 
         read_order_item(&conn, item_id)
     }
+}
+
+/// Restore a previously soft-cancelled item (undo an accidental cancellation).
+/// Brings the item back into the order and recalculates the total. Hard-deleted
+/// draft items can't be restored — they no longer exist.
+#[tauri::command]
+pub fn restore_order_item(db: State<DbState>, item_id: i64) -> Result<OrderItem, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let item = read_order_item(&conn, item_id)?;
+    if !item.is_cancelled {
+        return Err("Позиция не отменена".to_string());
+    }
+
+    let status = get_order_status(&conn, item.order_id)?;
+    if status == "cancelled" {
+        return Err("Заказ отменён — сначала восстановите заказ".to_string());
+    }
+
+    conn.execute(
+        "UPDATE order_items SET is_cancelled = 0, updated_at = datetime('now') WHERE id = ?1",
+        rusqlite::params![item_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    recalculate_order_total(&conn, item.order_id)?;
+
+    read_order_item(&conn, item_id)
 }
 
 #[tauri::command]

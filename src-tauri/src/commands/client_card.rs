@@ -13,6 +13,10 @@ pub struct ClientCardSummary {
     pub revenue: f64,
     pub avg_check: f64,
     pub current_debt: f64,
+    /// Money stranded inside orders where paid_amount exceeds total_amount
+    /// (e.g. items cancelled after payment). Should normally be 0 — a positive
+    /// value signals credit that belongs on the client's balance.
+    pub overpaid_in_orders: f64,
     pub last_order_at: Option<String>,
 }
 
@@ -68,6 +72,8 @@ pub fn get_client_card_summary(
                 COALESCE(SUM(CASE WHEN production_status != 'cancelled' THEN total_amount ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN production_status != 'cancelled'
                     AND total_amount > paid_amount THEN total_amount - paid_amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN production_status != 'cancelled'
+                    AND paid_amount > total_amount THEN paid_amount - total_amount ELSE 0 END), 0),
                 MAX(CASE WHEN production_status != 'cancelled' THEN created_at END)
              FROM orders WHERE client_id = ?1",
             rusqlite::params![client_id],
@@ -77,7 +83,8 @@ pub fn get_client_card_summary(
                 let orders_cancelled: i64 = row.get(2)?;
                 let revenue: f64 = row.get(3)?;
                 let current_debt: f64 = row.get(4)?;
-                let last_order_at: Option<String> = row.get(5)?;
+                let overpaid_in_orders: f64 = row.get(5)?;
+                let last_order_at: Option<String> = row.get(6)?;
                 let avg_check = if orders_total > 0 {
                     revenue / orders_total as f64
                 } else {
@@ -90,6 +97,7 @@ pub fn get_client_card_summary(
                     revenue,
                     avg_check,
                     current_debt,
+                    overpaid_in_orders,
                     last_order_at,
                 })
             },

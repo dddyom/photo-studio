@@ -9,6 +9,7 @@ import {
   transactionDirectionColor,
 } from "@/shared/orderLabels";
 import { FinanceNav } from "./FinanceNav";
+import { OrderSummaryPopover } from "./components/OrderSummaryPopover";
 
 // Types whose void cascade is implemented in the backend (see apply_effects in finance.rs).
 // Other types (e.g. supplier_debt_opened with payments) get a backend error if attempted.
@@ -261,6 +262,9 @@ export function TransactionJournal() {
                   <tr key={tx.id} className={voided ? "bg-gray-50/60 hover:bg-gray-100/60" : "hover:bg-gray-50"}>
                     <td className={`px-4 py-2.5 whitespace-nowrap ${voided ? "text-gray-400 line-through" : "text-gray-600"}`}>
                       {formatDate(tx.transaction_date)}
+                      {tx.created_at?.length >= 16 && (
+                        <span className="ml-1.5 text-xs text-gray-400">{tx.created_at.slice(11, 16)}</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`inline-block px-2 py-0.5 text-xs rounded ${voided ? "bg-gray-100 text-gray-400 line-through" : "bg-gray-100 text-gray-700"}`}>
@@ -280,8 +284,12 @@ export function TransactionJournal() {
                       {tx.account_name ?? "—"}
                     </td>
                     <td className="px-4 py-2.5">
-                      {tx.order_number ? (
-                        <span className={`font-mono ${voided ? "text-gray-400 line-through" : "text-blue-600"}`}>{tx.order_number}</span>
+                      {tx.order_number && tx.order_id ? (
+                        <OrderSummaryPopover
+                          orderId={tx.order_id}
+                          orderNumber={tx.order_number}
+                          voided={voided}
+                        />
                       ) : (
                         <span className="text-gray-300">—</span>
                       )}

@@ -282,6 +282,7 @@ export interface Order {
   folder_path: string | null;
   created_at: string;
   updated_at: string;
+  items_count: number;
 }
 
 export interface CreateOrderInput {
@@ -801,6 +802,7 @@ export const orders = {
   updateDeliveryStatus: (id: number, status: string) =>
     invoke<Order>("update_delivery_status", { id, status }),
   delete: (id: number) => invoke<void>("delete_order", { id }),
+  cancelAndDelete: (id: number) => invoke<void>("cancel_and_delete_order", { id }),
 };
 
 // ── Order item commands ──────────────────────────────────────────────
@@ -816,8 +818,10 @@ export const orderItems = {
     invoke<OrderItem>("add_service_item", { input }),
   addExtra: (input: AddExtraItemInput) =>
     invoke<OrderItem>("add_extra_item", { input }),
-  cancel: (itemId: number) =>
-    invoke<OrderItem>("cancel_order_item", { itemId }),
+  cancel: (itemId: number, force = false) =>
+    invoke<OrderItem>("cancel_order_item", { itemId, force }),
+  restore: (itemId: number) =>
+    invoke<OrderItem>("restore_order_item", { itemId }),
   updatePrice: (itemId: number, input: UpdateItemPriceInput) =>
     invoke<OrderItem>("update_order_item_price", { itemId, input }),
   update: (itemId: number, input: UpdateOrderItemInput) =>
@@ -869,6 +873,7 @@ export interface ClientCardSummary {
   revenue: number;
   avg_check: number;
   current_debt: number;
+  overpaid_in_orders: number;
   last_order_at: string | null;
 }
 

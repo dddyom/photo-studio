@@ -24,6 +24,8 @@ pub struct Order {
     pub folder_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Count of non-cancelled items.
+    pub items_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +66,9 @@ fn read_order(conn: &Connection, id: i64) -> Result<Order, String> {
         "SELECT o.id, o.number, o.client_id, c.name, o.pricing_program_id,
                 o.production_status, o.payment_status, o.delivery_status,
                 o.total_amount, o.paid_amount, o.notes, o.due_date,
-                o.folder_path, o.created_at, o.updated_at
+                o.folder_path, o.created_at, o.updated_at,
+                (SELECT COUNT(*) FROM order_items oi
+                 WHERE oi.order_id = o.id AND oi.is_cancelled = 0)
          FROM orders o
          LEFT JOIN clients c ON c.id = o.client_id
          WHERE o.id = ?1",
@@ -89,6 +93,7 @@ fn read_order(conn: &Connection, id: i64) -> Result<Order, String> {
                 folder_path: row.get(12)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
+                items_count: row.get(15)?,
             })
         },
     )
@@ -385,10 +390,24 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
         )
         .map_err(|_| "Заказ не найден".to_string())?;
 
-    if !matches!(status.as_str(), "draft" | "cancelled") {
+    // Count items still in the order. Empty orders (all items cancelled, or
+    // never added) are junk that often gets stuck in a non-draft status — allow
+    // deleting those regardless of status. Orders that still hold items must be
+    // a draft or cancelled first. The financial-trace guards below apply in all
+    // cases, so anything with real money or production history stays protected.
+    let active_items: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM order_items WHERE order_id = ?1 AND is_cancelled = 0",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if !matches!(status.as_str(), "draft" | "cancelled") && active_items > 0 {
         return Err(format!(
-            "Удалять можно только черновики или отменённые заказы (текущий статус: {status}). \
-             Сначала отмените заказ."
+            "Удалять можно черновики, отменённые или пустые заказы (без позиций). \
+             Текущий статус: {status}, активных позиций: {active_items}. \
+             Сначала отмените заказ или его позиции."
         ));
     }
 
@@ -454,11 +473,21 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
             |_| Ok(true),
         )
         .unwrap_or(false);
-    if has_production_log {
-        return Err("По заказу был запущен производственный процесс — удаление недоступно.".to_string());
+    // Production history only blocks deletion while the order still holds items.
+    // For an empty order (items all cancelled) the log is just leftover history
+    // of now-cancelled items and carries no financial meaning — let it go.
+    if has_production_log && active_items > 0 {
+        return Err("По заказу идёт производство — удаление недоступно. Сначала отмените позиции.".to_string());
     }
 
-    // Cascade delete: per-item detail tables → items → voided payments/refunds/balance tx → order
+    delete_order_rows(conn, id)
+}
+
+/// Raw cascade delete of an order and all its rows. NO guards — callers must
+/// have either passed the checks in `delete_order_body` or reversed every
+/// financial effect (see `cancel_and_delete_order_body`) before calling this.
+fn delete_order_rows(conn: &Connection, id: i64) -> Result<(), String> {
+    // Per-item detail tables → items → payments/refunds/balance tx → order
     conn.execute(
         "DELETE FROM order_item_books WHERE order_item_id IN
             (SELECT id FROM order_items WHERE order_id = ?1)",
@@ -477,12 +506,19 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
         rusqlite::params![id],
     )
     .map_err(|e| e.to_string())?;
+    // Production log references order_items without ON DELETE CASCADE — wipe it
+    // before the items so the foreign key doesn't block deletion.
+    conn.execute(
+        "DELETE FROM production_log WHERE order_item_id IN
+            (SELECT id FROM order_items WHERE order_id = ?1)",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM order_items WHERE order_id = ?1",
         rusqlite::params![id],
     )
     .map_err(|e| e.to_string())?;
-    // Voided rows (passed the checks above) get wiped along with the order
     conn.execute(
         "DELETE FROM order_payments WHERE order_id = ?1",
         rusqlite::params![id],
@@ -499,7 +535,7 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     // finance_transactions referencing this order: NULL out order_id so the
-    // history record stays intact (though it shouldn't exist non-voided here)
+    // (now voided) history record stays in the journal.
     conn.execute(
         "UPDATE finance_transactions SET order_id = NULL WHERE order_id = ?1",
         rusqlite::params![id],
@@ -510,6 +546,107 @@ fn delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// "Отменить заказ полностью": reverse every financial effect of an order
+/// (payments, refunds, balance movements, deliveries) using the same primitives
+/// as the finance journal, then hard-delete the order. Unlike `delete_order`,
+/// this works on orders WITH a financial trace — it undoes that trace first.
+/// Wrapped in a transaction so a mid-reversal failure rolls back cleanly.
+#[tauri::command]
+pub fn cancel_and_delete_order(db: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let result = cancel_and_delete_order_body(&conn, id);
+    if result.is_ok() {
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    result
+}
+
+fn cancel_and_delete_order_body(conn: &Connection, id: i64) -> Result<(), String> {
+    let _: i64 = conn
+        .query_row(
+            "SELECT id FROM orders WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Заказ не найден".to_string())?;
+
+    // 1. Void every non-voided finance transaction tied to this order
+    //    (order payments in, refunds out). force=true bypasses closed-period
+    //    blocks (reopening them), cascade_balance=true unwinds surplus that was
+    //    already spent from the client balance. This reverses company-account
+    //    balances and client-balance surplus through the tested void path.
+    let ft_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM finance_transactions
+                 WHERE order_id = ?1 AND voided_at IS NULL
+                 ORDER BY id DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map(rusqlite::params![id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(|e| e.to_string())?;
+        ids
+    };
+    for ft_id in ft_ids {
+        crate::commands::finance::void_transaction_body(
+            conn,
+            ft_id,
+            "Полная отмена заказа",
+            true,
+            true,
+        )?;
+    }
+
+    // 2. Reverse any remaining non-voided client-balance movements on this order.
+    //    These are pay-from-balance entries (direction 'out', no finance tx) and
+    //    any surplus not already unwound above. 'out' returns money to balance,
+    //    'in' removes it.
+    let bal_txs: Vec<(i64, String, f64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, direction, amount, client_id
+                 FROM client_balance_transactions
+                 WHERE order_id = ?1 AND voided_at IS NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    for (cbt_id, direction, amount, client_id) in bal_txs {
+        let delta = if direction == "out" { amount } else { -amount };
+        conn.execute(
+            "UPDATE clients SET balance = balance + ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![delta, client_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE client_balance_transactions SET voided_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![cbt_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // 3. Drop delivery marks (no money attached).
+    conn.execute(
+        "DELETE FROM order_deliveries WHERE order_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 4. Everything reversed — hard-delete the order and its rows.
+    delete_order_rows(conn, id)
 }
 
 #[tauri::command]
@@ -582,7 +719,9 @@ pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Or
         "SELECT o.id, o.number, o.client_id, c.name, o.pricing_program_id,
                 o.production_status, o.payment_status, o.delivery_status,
                 o.total_amount, o.paid_amount, o.notes, o.due_date,
-                o.folder_path, o.created_at, o.updated_at
+                o.folder_path, o.created_at, o.updated_at,
+                (SELECT COUNT(*) FROM order_items oi
+                 WHERE oi.order_id = o.id AND oi.is_cancelled = 0)
          FROM orders o
          LEFT JOIN clients c ON c.id = o.client_id
          {where_clause}
@@ -613,6 +752,7 @@ pub fn list_orders(db: State<DbState>, filter: OrderListFilter) -> Result<Vec<Or
                 folder_path: row.get(12)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
+                items_count: row.get(15)?,
             })
         })
         .map_err(|e| e.to_string())?
