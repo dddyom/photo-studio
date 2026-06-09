@@ -168,6 +168,41 @@ pub(crate) fn recompute_payment_status(conn: &Connection, order_id: i64) -> Resu
     )
     .map_err(|e| e.to_string())?;
 
+    sync_auto_close(conn, order_id)?;
+
+    Ok(())
+}
+
+/// Автозакрытие/переоткрытие заказа. Заказ считается полностью завершённым,
+/// когда он готов (ready), полностью оплачен и выдан — тогда переводим его в
+/// 'closed'. Если одно из условий перестало выполняться (отменили оплату/выдачу),
+/// возвращаем закрытый заказ в 'ready'. Прочие статусы не трогаем.
+pub(crate) fn sync_auto_close(conn: &Connection, order_id: i64) -> Result<(), String> {
+    let (prod, pay, deliv): (String, String, String) = conn
+        .query_row(
+            "SELECT production_status, payment_status, delivery_status
+             FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let settled = matches!(pay.as_str(), "paid" | "overpaid") && deliv == "delivered";
+
+    if settled && prod == "ready" {
+        conn.execute(
+            "UPDATE orders SET production_status = 'closed', updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![order_id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else if !settled && prod == "closed" {
+        conn.execute(
+            "UPDATE orders SET production_status = 'ready', updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![order_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -292,6 +327,85 @@ pub fn cancel_order(db: State<DbState>, id: i64) -> Result<Order, String> {
     read_order(&conn, id)
 }
 
+// Bring a cancelled order back into a workable state. The previous status isn't
+// stored, so the caller picks the target ('draft' or 'in_work'). Restoring is
+// blocked when the order carries a financial trace — payments, refunds,
+// deliveries or client-balance transactions must be sorted out in the finance
+// journal first (mirrors the delete guards). Typical use: un-cancel a stuck
+// order so its leftover items can be cleaned up and the order deleted.
+#[tauri::command]
+pub fn restore_order(
+    db: State<DbState>,
+    id: i64,
+    target_status: String,
+) -> Result<Order, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order = read_order(&conn, id)?;
+
+    if order.production_status != "cancelled" {
+        return Err("Восстановить можно только отменённый заказ".to_string());
+    }
+
+    if !matches!(target_status.as_str(), "draft" | "in_work") {
+        return Err(format!(
+            "Недопустимый статус восстановления: {target_status}"
+        ));
+    }
+
+    let has_payments: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_payments WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_payments {
+        return Err("У заказа есть оплаты. Сначала отмените их в журнале финансов.".to_string());
+    }
+
+    let has_refunds: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_refunds WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_refunds {
+        return Err("У заказа есть возвраты. Сначала отмените их в журнале финансов.".to_string());
+    }
+
+    let has_deliveries: bool = conn
+        .query_row(
+            "SELECT 1 FROM order_deliveries WHERE order_id = ?1 LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_deliveries {
+        return Err("У заказа есть отметки выдачи — восстановление недоступно.".to_string());
+    }
+
+    let has_balance_tx: bool = conn
+        .query_row(
+            "SELECT 1 FROM client_balance_transactions
+             WHERE order_id = ?1 AND voided_at IS NULL LIMIT 1",
+            rusqlite::params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_balance_tx {
+        return Err("По заказу были операции с балансом клиента. Сначала отмените их.".to_string());
+    }
+
+    conn.execute(
+        "UPDATE orders SET production_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![target_status, id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    read_order(&conn, id)
+}
+
 #[tauri::command]
 pub fn update_production_status(
     db: State<DbState>,
@@ -361,6 +475,8 @@ pub fn update_delivery_status(
         rusqlite::params![status, id],
     )
     .map_err(|e| e.to_string())?;
+
+    sync_auto_close(&conn, id)?;
 
     read_order(&conn, id)
 }

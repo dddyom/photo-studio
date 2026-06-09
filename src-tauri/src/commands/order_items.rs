@@ -718,6 +718,15 @@ pub fn cancel_order_item(
             rusqlite::params![item_id],
         )
         .map_err(|e| e.to_string())?;
+        // Drop production history before the item itself — production_log has a
+        // NOT NULL FK to order_items, so a leftover row (e.g. on an order that
+        // was in production before being cancelled and restored to draft) would
+        // make the DELETE below fail with a foreign-key violation.
+        conn.execute(
+            "DELETE FROM production_log WHERE order_item_id = ?1",
+            rusqlite::params![item_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM order_items WHERE id = ?1",
             rusqlite::params![item_id],

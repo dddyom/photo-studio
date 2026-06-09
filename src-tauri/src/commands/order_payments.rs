@@ -390,6 +390,49 @@ pub fn register_delivery(
 
     let delivery_id = conn.last_insert_rowid();
 
+    // Выдача = заказ полностью произведён. Доводим все непогашенные позиции
+    // до 'done' (с записью в production_log) и переводим заказ в 'ready'.
+    let pending_items: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, production_step FROM order_items
+                 WHERE order_id = ?1 AND is_cancelled = 0 AND production_step != 'done'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![input.order_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+
+    for (item_id, from_step) in &pending_items {
+        conn.execute(
+            "UPDATE order_items SET production_step = 'done', updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![item_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO production_log (order_item_id, from_step, to_step) VALUES (?1, ?2, 'done')",
+            rusqlite::params![item_id, from_step],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Заказ в активном производстве → 'ready' (готовый/закрытый не трогаем)
+    if matches!(prod_status.as_str(), "confirmed" | "in_work") {
+        conn.execute(
+            "UPDATE orders SET production_status = 'ready', updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![input.order_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     // Auto-set delivery_status to 'delivered'
     conn.execute(
         "UPDATE orders SET delivery_status = 'delivered', updated_at = datetime('now')
@@ -397,6 +440,9 @@ pub fn register_delivery(
         rusqlite::params![input.order_id],
     )
     .map_err(|e| e.to_string())?;
+
+    // Готов + оплачен + выдан → заказ автоматически закрывается.
+    crate::commands::orders::sync_auto_close(&conn, input.order_id)?;
 
     conn.query_row(
         "SELECT id, order_id, delivered_by, notes, delivered_at, created_at
@@ -451,6 +497,9 @@ pub fn delete_order_delivery(db: State<DbState>, delivery_id: i64) -> Result<(),
         rusqlite::params![status, order_id],
     )
     .map_err(|e| e.to_string())?;
+
+    // Снятие выдачи может «расзакрыть» заказ обратно в 'ready'.
+    crate::commands::orders::sync_auto_close(&conn, order_id)?;
 
     Ok(())
 }

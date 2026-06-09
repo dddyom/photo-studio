@@ -139,6 +139,7 @@ pub fn run() {
             commands::orders::update_order,
             commands::orders::confirm_order,
             commands::orders::cancel_order,
+            commands::orders::restore_order,
             commands::orders::update_production_status,
             commands::orders::update_delivery_status,
             commands::orders::list_orders,

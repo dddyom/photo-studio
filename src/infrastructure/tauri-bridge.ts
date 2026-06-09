@@ -798,6 +798,8 @@ export const orders = {
     invoke<Order>("update_order", { id, input }),
   confirm: (id: number) => invoke<Order>("confirm_order", { id }),
   cancel: (id: number) => invoke<Order>("cancel_order", { id }),
+  restore: (id: number, targetStatus: "draft" | "in_work") =>
+    invoke<Order>("restore_order", { id, targetStatus }),
   updateProductionStatus: (id: number, status: string) =>
     invoke<Order>("update_production_status", { id, status }),
   updateDeliveryStatus: (id: number, status: string) =>

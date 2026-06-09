@@ -697,6 +697,32 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
 
         CREATE INDEX idx_client_notes_client ON client_notes(client_id);
     "),
+
+    // ── v23: Backfill — выданный заказ считается полностью произведённым ──
+    // Раньше «Выдать» ставила только delivery_status='delivered', не трогая
+    // позиции и production_status. Приводим уже выданные заказы к консистентному
+    // состоянию: все непогашенные позиции → 'done', заказ → 'ready'.
+    (23, "backfill delivered orders to fully produced", "
+        UPDATE order_items
+        SET production_step = 'done', updated_at = datetime('now')
+        WHERE is_cancelled = 0
+          AND production_step != 'done'
+          AND order_id IN (
+              SELECT id FROM orders WHERE delivery_status = 'delivered'
+          );
+
+        UPDATE orders
+        SET production_status = 'ready', updated_at = datetime('now')
+        WHERE delivery_status = 'delivered'
+          AND production_status IN ('confirmed', 'in_work');
+
+        -- Выдан + полностью оплачен → автоматически закрыт.
+        UPDATE orders
+        SET production_status = 'closed', updated_at = datetime('now')
+        WHERE delivery_status = 'delivered'
+          AND payment_status IN ('paid', 'overpaid')
+          AND production_status = 'ready';
+    "),
 ];
 
 /// Bootstrap the migrations tracking table and apply pending migrations.

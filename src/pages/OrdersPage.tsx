@@ -586,7 +586,7 @@ function OrderDetail({
           <div className="bg-white border border-gray-200 rounded-md p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-base font-semibold">Оплаты</h3>
-              {!isCancelled && (
+              {!isCancelled && !["paid", "overpaid"].includes(order.payment_status) && (
                 <button onClick={() => setShowPayment(true)} className="text-sm text-blue-600 hover:text-blue-700">+ Оплата</button>
               )}
             </div>
@@ -619,7 +619,7 @@ function OrderDetail({
           <div className="bg-white border border-gray-200 rounded-md p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-base font-semibold">Выдача</h3>
-              {!isCancelled && !isDraft && (
+              {!isCancelled && !isDraft && order.delivery_status !== "delivered" && (
                 <button onClick={() => setShowDelivery(true)} className="text-sm text-blue-600 hover:text-blue-700">+ Выдать</button>
               )}
             </div>
@@ -794,6 +794,7 @@ function ActionBar({
   const isCancelled = order.production_status === "cancelled";
   const isDraft = order.production_status === "draft";
   const nextStatus = getNextProductionStatus(order.production_status);
+  const [restoreOpen, setRestoreOpen] = useState(false);
 
   const nextLabel = order.production_status === "draft" ? "Начать" :
     (PRODUCTION_STATUS_LABELS[nextStatus as keyof typeof PRODUCTION_STATUS_LABELS] ?? nextStatus);
@@ -811,6 +812,17 @@ function ActionBar({
       toast.success(`Статус: ${PRODUCTION_STATUS_LABELS[status as keyof typeof PRODUCTION_STATUS_LABELS] ?? status}`);
       onRefresh();
     } catch (err) { toast.error(String(err)); }
+  };
+
+  const handleRestore = async (target: "draft" | "in_work") => {
+    try {
+      await orders.restore(order.id, target);
+      toast.success(target === "draft" ? "Заказ возвращён в черновик" : "Заказ возвращён в работу");
+      setRestoreOpen(false);
+      onRefresh();
+    } catch (err) {
+      toast.error(String(err), { duration: 7000 });
+    }
   };
 
   const handleDelete = async () => {
@@ -839,14 +851,31 @@ function ActionBar({
           {nextLabel}
         </button>
       )}
-      {!isCancelled && (
+      {!isCancelled && !["paid", "overpaid"].includes(order.payment_status) && (
         <button onClick={onPayment} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Оплата</button>
       )}
-      {!["draft", "cancelled"].includes(order.production_status) && (
+      {!["draft", "cancelled"].includes(order.production_status) && order.delivery_status !== "delivered" && (
         <button onClick={onDelivery} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Выдать</button>
       )}
       {["draft", "in_work"].includes(order.production_status) && (
         <button onClick={() => changeStatus("cancelled")} className="px-3 py-1.5 text-red-600 border border-red-200 bg-white text-sm rounded-md hover:bg-red-50 transition-colors">Отменить</button>
+      )}
+      {isCancelled && !restoreOpen && (
+        <button
+          onClick={() => setRestoreOpen(true)}
+          title="Вернуть заказ из отмены, чтобы почистить позиции или удалить его полностью."
+          className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 transition-colors"
+        >
+          Восстановить
+        </button>
+      )}
+      {isCancelled && restoreOpen && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-600">Вернуть как:</span>
+          <button onClick={() => handleRestore("draft")} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">Черновик</button>
+          <button onClick={() => handleRestore("in_work")} className="px-3 py-1.5 border border-gray-200 bg-white text-sm rounded-md hover:bg-gray-50 transition-colors">В работу</button>
+          <button onClick={() => setRestoreOpen(false)} className="px-2 py-1.5 text-gray-400 text-sm rounded-md hover:text-gray-600" title="Отмена">×</button>
+        </div>
       )}
       {canDelete && (
         <button
@@ -866,7 +895,7 @@ function getNextProductionStatus(current: string): string | null {
     case "draft": return "in_work";
     case "confirmed": return "in_work"; // legacy
     case "in_work": return "ready";
-    case "ready": return "closed";
+    // 'ready' → 'closed' происходит автоматически, когда заказ оплачен и выдан
     default: return null;
   }
 }
@@ -926,10 +955,14 @@ function ItemRow({
               </span>
             )}
             {item.price_source === "manual" && (
-              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">Ручная цена</span>
+              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700"
+                title={item.manual_price_reason || undefined}>Ручная цена</span>
             )}
           </div>
           <p className="text-sm mt-1">{item.description || "—"}</p>
+          {item.price_source === "manual" && item.manual_price_reason && (
+            <p className="text-xs text-yellow-700 mt-0.5">Причина: {item.manual_price_reason}</p>
+          )}
         </div>
         <div className="text-right ml-4 shrink-0">
           <div className="text-sm font-mono">
