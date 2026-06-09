@@ -945,7 +945,7 @@ function ItemRow({
     }`}>
       <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center flex-wrap gap-2">
             <span className="text-xs px-1.5 py-0.5 bg-gray-100 rounded text-gray-600">
               {ITEM_KIND_LABELS[item.item_kind]}
             </span>
@@ -955,7 +955,7 @@ function ItemRow({
               </span>
             )}
             {item.price_source === "manual" && (
-              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">
+              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700 break-words min-w-0 max-w-full">
                 Ручная цена{item.manual_price_reason ? `: ${item.manual_price_reason}` : ""}
               </span>
             )}
