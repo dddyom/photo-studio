@@ -955,14 +955,12 @@ function ItemRow({
               </span>
             )}
             {item.price_source === "manual" && (
-              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700"
-                title={item.manual_price_reason || undefined}>Ручная цена</span>
+              <span className="text-xs px-1.5 py-0.5 bg-yellow-100 rounded text-yellow-700">
+                Ручная цена{item.manual_price_reason ? `: ${item.manual_price_reason}` : ""}
+              </span>
             )}
           </div>
           <p className="text-sm mt-1">{item.description || "—"}</p>
-          {item.price_source === "manual" && item.manual_price_reason && (
-            <p className="text-xs text-yellow-700 mt-0.5">Причина: {item.manual_price_reason}</p>
-          )}
         </div>
         <div className="text-right ml-4 shrink-0">
           <div className="text-sm font-mono">
